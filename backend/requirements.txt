@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+gitpython
+chromadb
+ollama
+python-dotenv
