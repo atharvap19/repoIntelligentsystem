@@ -1,0 +1,165 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Light theme is the fallback definition; .dark overrides the same tokens. */
+  :root {
+    --c-canvas: 250 250 249;
+    --c-surface: 255 255 255;
+    --c-raised: 245 245 244;
+    --c-hairline: 226 224 220;
+    --c-ink: 28 27 26;
+    --c-muted: 96 93 89;
+    --c-faint: 148 144 139;
+    --c-accent: 194 118 12;
+    --c-accent-soft: 253 240 217;
+    --c-signal: 13 130 130;
+    --c-danger: 190 52 44;
+
+    --grid-line: rgb(0 0 0 / 0.028);
+    color-scheme: light;
+  }
+
+  .dark {
+    --c-canvas: 12 12 13;
+    --c-surface: 21 21 23;
+    --c-raised: 30 30 33;
+    --c-hairline: 46 46 50;
+    --c-ink: 237 236 233;
+    --c-muted: 150 148 144;
+    --c-faint: 103 101 98;
+    --c-accent: 232 165 62;
+    --c-accent-soft: 58 42 18;
+    --c-signal: 66 190 180;
+    --c-danger: 226 106 96;
+
+    --grid-line: rgb(255 255 255 / 0.022);
+    color-scheme: dark;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-canvas text-ink font-sans antialiased;
+    /* Faint engineering-drafting grid — the texture that separates this from
+       AI Studio's flat white canvas. */
+    background-image: linear-gradient(var(--grid-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+
+  ::selection {
+    @apply bg-accent/25;
+  }
+
+  *:focus-visible {
+    @apply outline-none ring-2 ring-accent/60 ring-offset-1 ring-offset-canvas;
+  }
+}
+
+@layer components {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--c-hairline)) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 9px;
+    height: 9px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply rounded-full border-[3px] border-solid border-transparent bg-hairline bg-clip-padding;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    @apply bg-faint;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  /* Section label used across all three columns. */
+  .rail-label {
+    @apply px-3 text-2xs font-semibold uppercase tracking-[0.14em] text-faint;
+  }
+}
+
+/* Markdown answer body. Kept hand-rolled instead of @tailwindcss/typography
+   so code blocks can inherit the theme tokens. */
+.answer {
+  @apply text-[0.9375rem] leading-[1.7] text-ink;
+}
+.answer > * + * {
+  @apply mt-3;
+}
+.answer h1,
+.answer h2,
+.answer h3 {
+  @apply mt-5 text-[0.9375rem] font-semibold tracking-tight;
+}
+.answer ul {
+  @apply list-disc space-y-1.5 pl-5 marker:text-faint;
+}
+.answer ol {
+  @apply list-decimal space-y-1.5 pl-5 marker:text-faint;
+}
+.answer a {
+  @apply text-accent underline underline-offset-2;
+}
+.answer blockquote {
+  @apply border-l-2 border-hairline pl-3 text-muted;
+}
+.answer table {
+  @apply block w-full overflow-x-auto border-collapse text-sm;
+}
+.answer th,
+.answer td {
+  @apply border border-hairline px-2.5 py-1.5 text-left;
+}
+.answer th {
+  @apply bg-raised font-semibold;
+}
+.answer :not(pre) > code {
+  @apply rounded border border-hairline bg-raised px-1 py-px font-mono text-[0.8125em] text-ink;
+}
+.answer pre {
+  @apply overflow-x-auto rounded-lg border border-hairline bg-raised p-3.5 font-mono text-[0.8125rem] leading-relaxed;
+}
+.answer pre code {
+  @apply bg-transparent p-0;
+}
+
+/* Minimal highlight.js token palette wired to theme tokens. */
+.hljs-comment,
+.hljs-quote {
+  @apply italic text-faint;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-type {
+  @apply text-accent;
+}
+.hljs-string,
+.hljs-attr,
+.hljs-regexp {
+  @apply text-signal;
+}
+.hljs-title,
+.hljs-title.function_,
+.hljs-section {
+  @apply font-medium text-ink;
+}
+.hljs-number,
+.hljs-symbol,
+.hljs-built_in {
+  @apply text-signal/90;
+}
+.hljs-variable,
+.hljs-params,
+.hljs-property {
+  @apply text-muted;
+}

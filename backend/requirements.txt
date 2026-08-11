@@ -4,3 +4,8 @@ gitpython
 chromadb
 ollama
 python-dotenv
+
+# LLM pipeline (prompt | ChatOllama | StrOutputParser).
+# See docs/langchain.md for the per-component evaluation.
+langchain-core
+langchain-ollama

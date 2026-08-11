@@ -15,7 +15,14 @@ env/
 .ruff_cache/
 
 backend/chroma_db/
+backend/graph_db/
 backend/repositories/
+
+node_modules/
+frontend/dist/
+frontend/node_modules/.tmp/
+frontend/.vite/
+npm-debug.log*
 
 *.log
 .DS_Store
