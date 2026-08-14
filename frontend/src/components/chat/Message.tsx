@@ -3,10 +3,43 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
 import { CopyButton, Tag, Thinking } from '@/components/common/Bits'
-import { IconFile, IconWarn } from '@/components/common/Icons'
+import { IconFile, IconLayers, IconWarn } from '@/components/common/Icons'
 import { cx, fileName, formatMs, toRelevance } from '@/lib/format'
 import { chunkKey, useAppStore } from '@/store/useAppStore'
+import type { NavigationTarget } from '@/lib/graphTypes'
 import type { Message as MessageType, Source } from '@/lib/types'
+import { INTENT_LABEL } from '@/components/graph/AIChat'
+
+/**
+ * The optional [Explore this →].
+ *
+ * Optional is the point (Part 5). The backend decides whether a meaningful
+ * visual target exists and this renders nothing when it does not — "how many
+ * Python files are there?" is answered, not explored, and a button under every
+ * answer teaches people to ignore the button.
+ *
+ * The destination comes from structured data, never from parsing the prose
+ * above it.
+ */
+function ExploreAction({ target }: { target: NavigationTarget }) {
+  const exploreFrom = useAppStore((s) => s.exploreFrom)
+
+  return (
+    <button
+      type="button"
+      onClick={() => void exploreFrom(target)}
+      className={cx(
+        'mt-3 inline-flex items-center gap-2 rounded-lg border border-accent/45 bg-accent/[0.07]',
+        'px-3 py-1.5 text-2xs font-medium text-accent transition-colors hover:bg-accent/12',
+      )}
+      title={`Open ${target.file || target.symbol || target.repository} in Explorer`}
+    >
+      <IconLayers width={12} height={12} />
+      {target.label}
+      <span aria-hidden>→</span>
+    </button>
+  )
+}
 
 /**
  * Citation chip.
@@ -150,10 +183,19 @@ function AssistantBody({ message }: { message: MessageType }) {
         </ReactMarkdown>
       </div>
 
+      {message.navigation?.available && <ExploreAction target={message.navigation} />}
+
       {message.sources && message.sources.length > 0 && <SourceStrip sources={message.sources} />}
 
-      <div className="mt-2.5 flex items-center gap-2">
+      <div className="mt-2.5 flex flex-wrap items-center gap-2">
         <CopyButton value={message.content} label="Copy answer" />
+        {message.intent && <Tag tone="accent">{INTENT_LABEL[message.intent] ?? message.intent}</Tag>}
+        {message.focusLabel && <Tag tone="signal">{message.focusLabel}</Tag>}
+        {/* How much of each evidence type reached the prompt — the honest
+            version of "grounded in your code". */}
+        {message.contextStats?.graph_nodes ? (
+          <Tag>{message.contextStats.graph_nodes} graph nodes</Tag>
+        ) : null}
         {message.latencyMs != null && <Tag>{formatMs(message.latencyMs)}</Tag>}
         {message.timings?.generate != null && <Tag>gen {formatMs(message.timings.generate)}</Tag>}
       </div>

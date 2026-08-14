@@ -74,6 +74,11 @@ CREATE TABLE IF NOT EXISTS commit_files (
 );
 CREATE INDEX IF NOT EXISTS idx_cf_path   ON commit_files(repository, relative_path, authored_at);
 CREATE INDEX IF NOT EXISTS idx_cf_module ON commit_files(repository, module, authored_at);
+-- The timeline joins commit_files to commits on sha for every dot. Without
+-- this the join is a scan per commit: 2.6s to draw FastAPI's 1,500 commits,
+-- 12ms with it. `IF NOT EXISTS` means existing databases pick it up on the
+-- next open, so no migration is needed.
+CREATE INDEX IF NOT EXISTS idx_cf_sha    ON commit_files(repository, sha);
 
 CREATE TABLE IF NOT EXISTS refs (
     repository  TEXT NOT NULL,
@@ -305,6 +310,27 @@ class GraphStore:
         ).fetchall()
         return [self._node(r) for r in rows]
 
+    def find_by_name(
+        self, repository: str, name: str, kinds: Sequence[str] | None = None, limit: int = 10
+    ) -> list[dict]:
+        """Nodes whose name matches exactly, case-insensitively.
+
+        Separate from :meth:`search_nodes` because substring search is the
+        wrong tool for a name the user typed in full. In FastAPI every path
+        under ``fastapi/`` contains the string "fastapi", so a LIKE search for
+        ``FastAPI`` matches all 956 files and the class actually called
+        ``FastAPI`` never surfaces. An exact match has to be tried first.
+        """
+        sql = "SELECT * FROM nodes WHERE repository = ? AND name = ? COLLATE NOCASE"
+        params: list[Any] = [repository, name]
+        if kinds:
+            sql += f" AND kind IN ({','.join('?' * len(kinds))})"
+            params.extend(kinds)
+        rows = self._connect().execute(
+            sql + " ORDER BY LENGTH(key) LIMIT ?", [*params, limit]
+        ).fetchall()
+        return [self._node(r) for r in rows]
+
     def search_nodes(
         self, repository: str, term: str, kinds: Sequence[str] | None = None, limit: int = 25
     ) -> list[dict]:
@@ -424,6 +450,98 @@ class GraphStore:
             (repository, timestamp),
         ).fetchall()
         return {r["relative_path"] for r in rows}
+
+    def commits(self, repository: str, limit: int = 60, before: int | None = None) -> list[dict]:
+        """Recent commits, newest first, with how many files each touched.
+
+        The file count is joined here rather than fetched per commit: the
+        timeline draws one dot per commit and labels each with its size, so
+        N+1 queries would be the whole cost of rendering it.
+
+        Merge commits report zero files by design — ``--name-status`` emits no
+        file list for them (see ``git_history``), so counting would be a lie
+        rather than a gap.
+        """
+        sql = (
+            "SELECT c.sha, c.author, c.authored_at, c.summary, c.is_merge,"
+            "       COUNT(f.relative_path) AS file_count"
+            "  FROM commits c"
+            "  LEFT JOIN commit_files f"
+            "    ON f.sha = c.sha AND f.repository = c.repository"
+            " WHERE c.repository = ?"
+        )
+        params: list[Any] = [repository]
+        if before is not None:
+            sql += " AND c.authored_at <= ?"
+            params.append(before)
+        sql += " GROUP BY c.sha ORDER BY c.authored_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows = self._connect().execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def commit(self, repository: str, sha: str) -> dict | None:
+        """One commit by full or abbreviated SHA."""
+        row = self._connect().execute(
+            "SELECT sha, author, authored_at, summary, is_merge FROM commits"
+            " WHERE repository = ? AND sha LIKE ? LIMIT 1",
+            (repository, f"{sha}%"),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def files_in_commit(self, repository: str, sha: str, limit: int = 200) -> list[dict]:
+        rows = self._connect().execute(
+            "SELECT relative_path, module, change_type FROM commit_files"
+            " WHERE repository = ? AND sha = ? ORDER BY relative_path LIMIT ?",
+            (repository, sha, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def changes_between(
+        self, repository: str, start_at: int, end_at: int, limit: int = 400
+    ) -> list[dict]:
+        """Per-path change counts within a time window.
+
+        The raw material for "what changed between these commits?" (Part 12).
+        Aggregated in SQL because a busy window can touch thousands of paths
+        and only the top of that list is ever shown.
+        """
+        rows = self._connect().execute(
+            "SELECT relative_path, module, COUNT(DISTINCT sha) AS commits,"
+            "       MAX(authored_at) AS last_at"
+            "  FROM commit_files"
+            " WHERE repository = ? AND authored_at > ? AND authored_at <= ?"
+            " GROUP BY relative_path ORDER BY commits DESC, last_at DESC LIMIT ?",
+            (repository, start_at, end_at, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def change_counts(self, repository: str) -> dict[str, int]:
+        """Commits per path across the indexed window — the churn metric."""
+        rows = self._connect().execute(
+            "SELECT relative_path, COUNT(DISTINCT sha) AS commits FROM commit_files"
+            " WHERE repository = ? GROUP BY relative_path",
+            (repository,),
+        ).fetchall()
+        return {r["relative_path"]: r["commits"] for r in rows}
+
+    def dependent_counts(self, repository: str, kinds: Sequence[str] | None = None) -> dict[str, int]:
+        """In-degree per node — how many things import each node.
+
+        Part 13's central metric, and the reason hotspots can be *explained*
+        rather than asserted: the number is a count of real edges, so an
+        answer can name them.
+        """
+        sql = (
+            "SELECT target_id, COUNT(*) AS n FROM edges"
+            " WHERE repository = ?"
+        )
+        params: list[Any] = [repository]
+        if kinds:
+            sql += f" AND kind IN ({','.join('?' * len(kinds))})"
+            params.extend(kinds)
+        rows = self._connect().execute(sql + " GROUP BY target_id", params).fetchall()
+        return {r["target_id"]: r["n"] for r in rows}
 
     def commit_range(self, repository: str) -> dict:
         row = self._connect().execute(

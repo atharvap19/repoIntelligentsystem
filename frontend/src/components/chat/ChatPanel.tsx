@@ -6,31 +6,31 @@ import { useActiveRepository, useAppStore } from '@/store/useAppStore'
 import { Composer } from './Composer'
 import { Message } from './Message'
 
-/** Question starters that demonstrate what repo-grounded retrieval is good at. */
+/** Starters chosen to land on different branches of the router. */
 const STARTERS = [
-  {
-    label: 'Entry points',
-    question: 'What are the entry points of this codebase and what happens on startup?',
-  },
   {
     label: 'Architecture',
     question: 'Describe the overall architecture and how the main modules depend on each other.',
   },
   {
-    label: 'Request path',
-    question: 'Trace what happens to an incoming request from route to response.',
+    label: 'Request flow',
+    question: 'How does a request flow through this repository?',
   },
   {
-    label: 'Data models',
-    question: 'What are the core data models and where are they defined?',
+    label: 'Hotspots',
+    question: 'Which files are most depended on, and which change most often?',
   },
   {
-    label: 'Error handling',
-    question: 'How are errors and exceptions handled across the codebase?',
+    label: 'Dependencies',
+    question: 'What depends on the main entry point?',
   },
   {
-    label: 'Onboarding',
-    question: 'If I were joining this project today, which five files should I read first and why?',
+    label: 'Layers',
+    question: 'Show me the database layer.',
+  },
+  {
+    label: 'Recent history',
+    question: 'What changed recently, and in which modules?',
   },
 ]
 
@@ -58,9 +58,13 @@ function Welcome() {
       </h1>
 
       <p className="mt-2 max-w-[58ch] text-sm leading-relaxed text-muted">
-        Every answer is assembled from chunks retrieved out of the vector store — and every one of
-        those chunks is shown to you in the inspector, with its file, its rank, and its raw text. No
-        hidden context.
+        Answers combine three sources — vector search, keyword search, and the repository&rsquo;s
+        import graph — so structural questions are answered from static analysis rather than guessed
+        from retrieved text. Every chunk that reached the model is shown in the inspector with its
+        file, rank and raw text. No hidden context.
+      </p>
+      <p className="mt-2 max-w-[58ch] text-sm leading-relaxed text-muted">
+        Repoint is read-only. It explains repositories; it never writes to them.
       </p>
 
       <div className="mt-7">

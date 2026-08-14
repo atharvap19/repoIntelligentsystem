@@ -19,7 +19,29 @@ INTENT_STRUCTURE = "structure_analysis"
 INTENT_DEPENDENCY = "dependency_analysis"
 INTENT_FILE = "file_analysis"
 INTENT_HISTORY = "git_history_analysis"
-INTENT_CODE_GENERATION = "code_generation"
+
+#: Part 10 — "how does a request flow through this repository?". Distinct from
+#: explanation because the answer is a *path* through the import graph, not a
+#: description of one unit.
+INTENT_FLOW = "flow_analysis"
+
+#: Part 8 — "show me the database layer", "everything related to
+#: authentication". The subject is a theme rather than a named symbol, so the
+#: answer is assembled from several units that share it.
+INTENT_CONCEPT = "concept_analysis"
+
+#: Part 13 — "which modules are most depended on?". Answered from computed
+#: graph and history metrics, never estimated.
+INTENT_HOTSPOT = "hotspot_analysis"
+
+#: Part 16 — a request to write, refactor or modify code. Repoint is
+#: read-only, so this intent exists to be declined clearly and to redirect to
+#: an explanation of what *would* change, not to be fulfilled.
+INTENT_READONLY = "readonly_request"
+
+#: Retained so Phase 3 imports keep resolving. The behaviour behind it changed
+#: in Phase 4 — see ``INTENT_READONLY``.
+INTENT_CODE_GENERATION = INTENT_READONLY
 
 INTENTS: tuple[str, ...] = (
     INTENT_SEARCH,
@@ -29,7 +51,10 @@ INTENTS: tuple[str, ...] = (
     INTENT_DEPENDENCY,
     INTENT_FILE,
     INTENT_HISTORY,
-    INTENT_CODE_GENERATION,
+    INTENT_FLOW,
+    INTENT_CONCEPT,
+    INTENT_HOTSPOT,
+    INTENT_READONLY,
 )
 
 #: (intent, weight, pattern). Weights let a decisive phrase outrank an
@@ -37,7 +62,8 @@ INTENTS: tuple[str, ...] = (
 _RULES: tuple[tuple[str, int, re.Pattern], ...] = (
     # dependency
     (INTENT_DEPENDENCY, 6, re.compile(r"\b(depends?\s+on|depend(s|ing)?\b.*\bon)\b", re.I)),
-    (INTENT_DEPENDENCY, 6, re.compile(r"\b(what|who|which)\b.*\b(uses|imports|calls|references)\b", re.I)),
+    (INTENT_DEPENDENCY, 6, re.compile(r"\b(what|who|which)\b.*\b(uses?|imports?|calls?|references?)\b", re.I)),
+    (INTENT_DEPENDENCY, 5, re.compile(r"\b(what|which)\b.*\b(connected to|related to this|linked to)\b", re.I)),
     (INTENT_DEPENDENCY, 5, re.compile(r"\b(dependents?|dependenc(y|ies)|reverse dependenc)", re.I)),
     (INTENT_DEPENDENCY, 4, re.compile(r"\b(impact|blast radius|affected by)\b", re.I)),
     # history
@@ -45,10 +71,30 @@ _RULES: tuple[tuple[str, int, re.Pattern], ...] = (
     (INTENT_HISTORY, 5, re.compile(r"\b(git|commit|commits|changelog|history|evolved|evolution)\b", re.I)),
     (INTENT_HISTORY, 5, re.compile(r"\bwhat\s+changed\b", re.I)),
     (INTENT_HISTORY, 4, re.compile(r"\b(who\s+(wrote|changed|added)|when\s+was)\b", re.I)),
-    # code generation
-    (INTENT_CODE_GENERATION, 7, re.compile(r"\b(write|create|generate|add|implement)\b.*\b(test|tests|function|class|method|endpoint|docstring)\b", re.I)),
-    (INTENT_CODE_GENERATION, 6, re.compile(r"\b(refactor|rewrite|convert|port)\b", re.I)),
-    (INTENT_CODE_GENERATION, 5, re.compile(r"\bunit tests?\b", re.I)),
+    # read-only refusal (Part 16) — a request to change the repository
+    (INTENT_READONLY, 7, re.compile(r"\b(write|create|generate|add|implement)\b.*\b(test|tests|function|class|method|endpoint|docstring)\b", re.I)),
+    (INTENT_READONLY, 6, re.compile(r"\b(refactor|rewrite|convert|port|migrate)\b", re.I)),
+    (INTENT_READONLY, 6, re.compile(r"\b(fix|patch|update|modify|change|delete|remove|rename)\b\s+(this|that|the|my)?\s*\b[\w./-]*\.(py|js|ts|tsx|jsx|java|go|rs)\b", re.I)),
+    (INTENT_READONLY, 5, re.compile(r"\bunit tests?\b", re.I)),
+    (INTENT_READONLY, 5, re.compile(r"\b(commit|push|apply|make)\s+(this|these|the)?\s*(change|changes|fix|edit)", re.I)),
+    # flow / control flow (Part 10)
+    (INTENT_FLOW, 7, re.compile(r"\bflows?\s+(through|into|from|to)\b", re.I)),
+    (INTENT_FLOW, 7, re.compile(r"\b(request|data|control|execution|call)\s+flow\b", re.I)),
+    (INTENT_FLOW, 6, re.compile(r"\bhow\s+does\b.*\b(flow|propagate|travel|move)\b", re.I)),
+    (INTENT_FLOW, 6, re.compile(r"\b(trace|walk)\b.*\b(request|path|flow|lifecycle|pipeline)\b", re.I)),
+    (INTENT_FLOW, 5, re.compile(r"\b(end[- ]to[- ]end|step[- ]by[- ]step|lifecycle|pipeline)\b", re.I)),
+    (INTENT_FLOW, 5, re.compile(r"\bwhat happens (when|to)\b", re.I)),
+    # concept / theme (Part 8)
+    (INTENT_CONCEPT, 7, re.compile(r"\b(show|find|give)\s+me\s+everything\b", re.I)),
+    (INTENT_CONCEPT, 6, re.compile(r"\beverything\s+(related\s+to|about|involving|touching)\b", re.I)),
+    (INTENT_CONCEPT, 6, re.compile(r"\b(database|data|auth(entication|orisation|orization)?|logging|caching|api|service|persistence|security|config(uration)?)\s+layer\b", re.I)),
+    (INTENT_CONCEPT, 5, re.compile(r"\ball\s+(the\s+)?(files|code|modules|classes)\s+(that|which|related|involved)\b", re.I)),
+    # hotspots (Part 13)
+    (INTENT_HOTSPOT, 7, re.compile(r"\bhot[\s-]?spots?\b", re.I)),
+    (INTENT_HOTSPOT, 6, re.compile(r"\bmost\s+(connected|depended|imported|used|changed|modified|complex)\b", re.I)),
+    (INTENT_HOTSPOT, 6, re.compile(r"\b(bottlenecks?|churn|most active)\b", re.I)),
+    (INTENT_HOTSPOT, 5, re.compile(r"\bwhich\s+(files?|modules?)\s+(changed|change)\s+the\s+most\b", re.I)),
+    (INTENT_HOTSPOT, 5, re.compile(r"\b(riskiest|most fragile|most critical)\b", re.I)),
     # structure
     (INTENT_STRUCTURE, 6, re.compile(r"\b(repo(sitory)?|project|folder|directory)\s+(structure|layout|tree|organis|organiz)", re.I)),
     (INTENT_STRUCTURE, 6, re.compile(r"\b(show|display|list)\b.*\b(structure|tree|layout|files|folders|modules)\b", re.I)),
@@ -84,6 +130,47 @@ _FILE_MENTION = re.compile(
 _SYMBOL_MENTION = re.compile(r"\b([A-Z][A-Za-z0-9]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\b")
 _SNAKE_MENTION = re.compile(r"\b([a-z_][a-z0-9_]{3,}(?:\.[a-z_][a-z0-9_]*)*)\s*\(")
 
+#: A file named without its extension — "explain the indexing file", "the auth
+#: module". Part 2 requires this: users do not type extensions, and without it
+#: "Explain the indexing file" resolves to nothing and falls back to a blind
+#: vector search. The captured stem is looked up in the graph like any other
+#: mention, so a name that matches nothing simply drops out.
+_BARE_FILE_MENTION = re.compile(
+    r"\b(?:the|my|our|a|an)\s+([a-z_][a-z0-9_-]{2,})\s+(?:file|module|script|service|class|function|package)\b",
+    re.I,
+)
+
+#: The same shape with the words reversed — "class AuthService", "module
+#: app.rag.parser", "function called build_context".
+#:
+#: Two alternatives rather than one, because the loose form matches ordinary
+#: English: "this function doing", "this file depend on", "this module
+#: evolved" all put a verb where a name would go. So a bare word only counts
+#: after an explicit "called"/"named"; otherwise the token must *look* like an
+#: identifier — dotted, underscored, or capitalised.
+_QUALIFIED_MENTION = re.compile(
+    r"\b(?:file|module|class|function|symbol|package)\s+"
+    r"(?:(?:called|named)\s+([A-Za-z_][\w.-]{2,})"
+    r"|([A-Za-z_][\w-]*(?:[._][\w-]+)+|[A-Z][A-Za-z0-9]{2,}))\b"
+)
+
+#: A bare snake_case identifier — "What does create_access_token do?".
+#:
+#: ``_SNAKE_MENTION`` only fires when the name is followed by ``(``, which is
+#: how it appears in code but not how anyone types it in a question. An
+#: underscore inside a word is the signal: ordinary English does not contain
+#: one, so this cannot match prose the way the bare-word patterns above can.
+_IDENTIFIER_MENTION = re.compile(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b", re.I)
+
+#: Themes rather than names: "the database layer", "everything related to
+#: authentication". Feeds concept questions (Part 8), which search by topic
+#: instead of resolving one node.
+_CONCEPT_MENTION = re.compile(
+    r"\b(?:related\s+to|about|involving|touching|everything\s+in)\s+(?:the\s+)?([a-z][\w-]{2,})",
+    re.I,
+)
+_LAYER_MENTION = re.compile(r"\b([a-z][\w-]{2,})\s+layer\b", re.I)
+
 
 @dataclass
 class Classification:
@@ -94,25 +181,81 @@ class Classification:
     mentions: list[str] = field(default_factory=list)
     #: True when the question leans on a pronoun and needs prior context.
     needs_context: bool = False
+    #: Themes named in the question, for concept questions.
+    concepts: list[str] = field(default_factory=list)
 
 
 def extract_mentions(question: str) -> list[str]:
-    """Concrete file or symbol names referenced in a question."""
+    """Concrete file or symbol names referenced in a question.
+
+    Ordered by how precise the pattern is, because the first resolvable
+    mention becomes the turn's focus: an explicit ``routing.py`` must win over
+    a bare "the routing module" appearing later in the same sentence.
+    """
     mentions: list[str] = []
     seen: set[str] = set()
 
-    for pattern in (_FILE_MENTION, _SYMBOL_MENTION, _SNAKE_MENTION):
+    patterns = (
+        _FILE_MENTION,
+        _SYMBOL_MENTION,
+        _SNAKE_MENTION,
+        _IDENTIFIER_MENTION,
+        _QUALIFIED_MENTION,
+        _BARE_FILE_MENTION,
+    )
+    for pattern in patterns:
         for match in pattern.finditer(question):
-            value = match.group(1)
+            # _QUALIFIED_MENTION alternates between two capture groups; the
+            # rest have one. Take whichever matched.
+            value = next((g for g in match.groups() if g), "")
+            if not value:
+                continue
             # Sentence-initial capitals are not symbol names.
             if pattern is _SYMBOL_MENTION and (
                 len(value) < 3 or value.lower() in _COMMON_WORDS
+            ):
+                continue
+            # The bare forms match ordinary English ("the same file"), so they
+            # are filtered harder than an explicit path needs to be.
+            if pattern in (_BARE_FILE_MENTION, _QUALIFIED_MENTION) and (
+                value.lower() in _COMMON_WORDS or value.lower() in _BARE_STOPWORDS
             ):
                 continue
             if value not in seen:
                 seen.add(value)
                 mentions.append(value)
     return mentions
+
+
+def extract_concepts(question: str) -> list[str]:
+    """Themes a question is about, when it names no specific symbol."""
+    concepts: list[str] = []
+    seen: set[str] = set()
+    for pattern in (_LAYER_MENTION, _CONCEPT_MENTION):
+        for match in pattern.finditer(question):
+            value = match.group(1).lower()
+            if value in _COMMON_WORDS or value in _BARE_STOPWORDS:
+                continue
+            if value not in seen:
+                seen.add(value)
+                concepts.append(value)
+    return concepts
+
+
+#: Words that fill the "the ___ file" slot without naming anything.
+_BARE_STOPWORDS = frozenset(
+    {
+        "same", "other", "another", "first", "last", "next", "previous",
+        "whole", "entire", "main", "current", "above", "below", "following",
+        "each", "every", "any", "some", "these", "those", "such", "right",
+        "wrong", "correct", "biggest", "largest", "smallest", "only", "one",
+        "two", "three", "new", "old", "big", "small", "top", "bottom",
+        # Structural nouns: "about the class Foo" names Foo, not "class".
+        "file", "files", "module", "modules", "class", "classes", "function",
+        "functions", "method", "methods", "symbol", "symbols", "package",
+        "packages", "folder", "directory", "script",
+    }
+)
 
 
 #: Sentence-initial words that capitalisation makes look like symbols.
@@ -131,6 +274,13 @@ _COMMON_WORDS = frozenset(
         "build", "help", "summarise", "summarize", "analyse", "analyze",
         # bare domain words that are never a specific symbol
         "api", "ai", "repo", "repository", "project", "codebase", "code",
+        # Language and ecosystem names. "How many Python files are there?"
+        # otherwise resolves focus onto whatever directory happens to be
+        # called `python_types`, and the answer is then offered as a place to
+        # explore — the exact false positive Part 5 warns against.
+        "python", "javascript", "typescript", "java", "golang", "rust",
+        "ruby", "php", "kotlin", "swift", "scala", "html", "css", "sql",
+        "json", "yaml", "node", "react", "vue", "django", "flask",
     }
 )
 
@@ -155,6 +305,7 @@ def classify(question: str) -> Classification:
             scores={},
             mentions=extract_mentions(text),
             needs_context=bool(_PRONOUNS.search(text)),
+            concepts=extract_concepts(text),
         )
 
     best = max(scores, key=scores.get)
@@ -167,4 +318,5 @@ def classify(question: str) -> Classification:
         scores=scores,
         mentions=extract_mentions(text),
         needs_context=bool(_PRONOUNS.search(text)),
+        concepts=extract_concepts(text),
     )

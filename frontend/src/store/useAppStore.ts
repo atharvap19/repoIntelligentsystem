@@ -2,7 +2,10 @@ import { useMemo } from 'react'
 import { create } from 'zustand'
 import * as api from '@/lib/api'
 import { ApiError } from '@/lib/api'
+import * as graphApi from '@/lib/graphApi'
 import { DEMO_REPOSITORIES } from '@/lib/demo'
+import type { NavigationTarget } from '@/lib/graphTypes'
+import { useGraphStore } from '@/store/useGraphStore'
 import type {
   ConnectionState,
   Message,
@@ -13,6 +16,9 @@ import type {
 
 const uid = () => Math.random().toString(36).slice(2, 10)
 
+const message = (err: unknown) =>
+  err instanceof ApiError || err instanceof Error ? err.message : 'Something went wrong.'
+
 const DEFAULT_SETTINGS: RunSettings = {
   topK: 5,
   model: 'qwen3:4b',
@@ -22,8 +28,22 @@ const DEFAULT_SETTINGS: RunSettings = {
 
 export type WorkspaceView = 'chat' | 'explorer'
 
+/**
+ * One conversation, two views.
+ *
+ * Phase 3 had a second conversation living in the graph store, so switching to
+ * Explorer silently started over. Part 4 forbids that: there is one thread,
+ * and the view is only where it is rendered. Everything conversational
+ * therefore lives here, and the graph store keeps graph state only.
+ *
+ * The thread is keyed by repository — asking about a different codebase is a
+ * different conversation, and carrying "it" across that boundary would resolve
+ * to the wrong file.
+ */
+const conversationId = (repository: string | null) => `repoint:${repository ?? 'none'}`
+
 interface AppState {
-  /** Which workspace is on screen. Explorer is additive; chat is untouched. */
+  /** Which workspace is on screen. The conversation is shared between them. */
   view: WorkspaceView
   setView: (view: WorkspaceView) => void
 
@@ -47,11 +67,15 @@ interface AppState {
   bootstrap: () => Promise<void>
   setDemoPinned: (pinned: boolean) => void
   selectRepository: (id: string) => void
+  /** Select by repository name — what the Explorer's picker calls. */
+  selectRepositoryByName: (name: string) => void
   importRepository: (url: string) => Promise<void>
   indexRepository: (id: string) => Promise<void>
   removeRepository: (id: string) => void
   ask: (question: string) => Promise<void>
   clearConversation: () => void
+  /** Follow an answer's [Explore this] into the graph, keeping the thread. */
+  exploreFrom: (target: NavigationTarget) => Promise<void>
   updateSettings: (patch: Partial<RunSettings>) => void
   focusChunk: (key: string | null) => void
   toggleInspector: () => void
@@ -135,9 +159,37 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ demoPinned: false, demo: connection !== 'online' })
   },
 
+  /**
+   * Switch repositories in both views at once.
+   *
+   * The conversation resets, deliberately: the thread is keyed by repository
+   * on the backend too, so carrying it across would leave "it" pointing at a
+   * file in a codebase that is no longer open.
+   */
   selectRepository(id) {
     if (get().activeRepositoryId === id) return
     set({ activeRepositoryId: id, messages: [], focusedChunkKey: null })
+
+    const name = get().repositories.find((r) => r.id === id)?.name
+    if (name && !get().demo) void useGraphStore.getState().selectRepository(name)
+  },
+
+  selectRepositoryByName(name) {
+    const match = get().repositories.find((r) => r.name === name)
+    if (match) {
+      get().selectRepository(match.id)
+      return
+    }
+    // Present in the graph but never imported through this session — adopt it
+    // so both views agree on what is selected.
+    const id = uid()
+    set((s) => ({
+      repositories: [...s.repositories, { id, name, state: 'ready', importedAt: Date.now() }],
+      activeRepositoryId: id,
+      messages: [],
+      focusedChunkKey: null,
+    }))
+    void useGraphStore.getState().selectRepository(name)
   },
 
   async importRepository(url) {
@@ -206,6 +258,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
   },
 
+  /**
+   * Ask the repository agent. The same call backs both views.
+   *
+   * The request carries whatever Explorer has selected, so a question asked
+   * from the sidebar needs no antecedent — "what depends on this?" resolves
+   * server-side against the selection. From the Chat view that payload is
+   * near-empty, which is the correct description of what the user is looking
+   * at.
+   */
   async ask(question) {
     const trimmed = question.trim()
     if (!trimmed || get().asking) return
@@ -247,29 +308,68 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     const startedAt = performance.now()
 
+    // Fixtures have no agent behind them, so demo mode keeps the Phase 2
+    // route and simply offers no navigation.
+    if (demo) {
+      try {
+        const response = await api.chat(trimmed, settings.topK, true, activeRepository?.name)
+        resolve({
+          content: response.answer ?? '',
+          sources: response.sources ?? [],
+          timings: response.timings,
+          latencyMs: performance.now() - startedAt,
+        })
+      } catch (err) {
+        resolve({ error: message(err), latencyMs: performance.now() - startedAt })
+      }
+      return
+    }
+
+    const graph = useGraphStore.getState()
+    const repositoryName = activeRepository?.name ?? graph.repository ?? ''
+
     try {
-      const response = await api.chat(trimmed, settings.topK, demo, activeRepository?.name)
+      const response = await graphApi.askAgent(
+        trimmed,
+        repositoryName,
+        conversationId(repositoryName),
+        settings.topK,
+        graph.explorerContext(),
+      )
+
       resolve({
         content: response.answer ?? '',
         sources: response.sources ?? [],
-        timings: response.timings,
+        intent: response.intent,
+        confidence: response.confidence,
+        focusLabel: response.focus?.label ?? null,
+        navigation: response.navigation,
+        uiAction: response.ui_action,
+        contextStats: response.context_stats,
         latencyMs: performance.now() - startedAt,
       })
+
+      // Already in Explorer: apply the graph action immediately, because the
+      // user can see the result. From the Chat view nothing moves until they
+      // choose to explore — Part 5's "never force it".
+      if (get().view === 'explorer' && response.ui_action) {
+        await useGraphStore.getState().applyAgentAction(response.ui_action)
+      }
     } catch (err) {
-      resolve({
-        error:
-          err instanceof ApiError
-            ? err.message
-            : err instanceof Error
-              ? err.message
-              : 'Something went wrong.',
-        latencyMs: performance.now() - startedAt,
-      })
+      resolve({ error: message(err), latencyMs: performance.now() - startedAt })
     }
   },
 
   clearConversation() {
     set({ messages: [], focusedChunkKey: null })
+  },
+
+  async exploreFrom(target) {
+    if (!target?.available) return
+    // Switch first so the graph work is visible while it happens rather than
+    // landing the user on a finished view with no sense of where they went.
+    set({ view: 'explorer' })
+    await useGraphStore.getState().applyNavigation(target)
   },
 
   updateSettings(patch) {

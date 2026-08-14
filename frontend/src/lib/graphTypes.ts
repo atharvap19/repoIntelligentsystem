@@ -166,12 +166,64 @@ export interface Snapshot {
 export type UiAction =
   | { type: 'open_file'; node_id: string }
   | { type: 'show_structure'; repository: string }
+  | { type: 'show_flow'; node_ids: string[] }
   | {
       type: 'highlight_dependencies'
       node_id: string
       dependencies: string[]
       dependents: string[]
     }
+
+/** Where an [Explore this] click should take the user (backend Part 6). */
+export type NavigationTargetType =
+  | 'repository'
+  | 'module'
+  | 'folder'
+  | 'file'
+  | 'class'
+  | 'function'
+  | 'symbol'
+  | 'graph_neighborhood'
+  | 'timeline'
+  | 'commit'
+  | 'architecture'
+
+export type FocusMode = 'center' | 'neighborhood' | 'expand' | 'timeline' | 'flow'
+
+/**
+ * Structured navigation, decided by the backend from the evidence it used.
+ *
+ * The frontend never parses answer text to find a destination — model output
+ * changes wording between runs, and a link built by parsing it breaks
+ * silently. `available` is the only field worth branching on; the rest are
+ * meaningful only when it is true.
+ */
+export interface NavigationTarget {
+  available: boolean
+  target_type: NavigationTargetType | ''
+  repository: string
+  module: string
+  file: string
+  symbol: string
+  node_id: string
+  related_node_ids: string[]
+  focus_mode: FocusMode
+  label: string
+  commit_sha: string
+  reason: string
+}
+
+/** What the user currently has open, sent with every question (Part 3). */
+export interface ExplorerContextPayload {
+  repository?: string
+  module?: string
+  file?: string
+  symbol?: string
+  node_id?: string
+  focus_node_ids?: string[]
+  commit_sha?: string
+  timestamp?: number | null
+}
 
 export interface AgentResponse {
   question: string
@@ -181,8 +233,82 @@ export interface AgentResponse {
   confidence: number
   answer: string
   focus: { node_id: string | null; label: string | null }
+  navigation: NavigationTarget | null
   ui_action: UiAction | null
   graph: unknown
   sources: import('./types').Source[]
+  context_stats: Record<string, number>
   trace: { node: string; [key: string]: unknown }[]
+}
+
+// -- history (Part 11) -----------------------------------------------------
+
+/** One dot on the commit timeline. */
+export interface CommitDot {
+  sha: string
+  short_sha: string
+  author: string
+  authored_at: number
+  summary: string
+  files_changed: number
+  is_merge: boolean
+  /** Tag name when this commit is a release, otherwise empty. */
+  release: string
+}
+
+export interface CommitTimeline {
+  repository: string
+  /** Oldest first — the order the line is drawn in. */
+  commits: CommitDot[]
+  range: { first_at: number | null; last_at: number | null; total: number }
+  truncated: boolean
+}
+
+export interface CommitFile {
+  relative_path: string
+  module: string
+  change_type: string
+  node_id: string
+  indexed: boolean
+}
+
+export interface CommitDetail {
+  repository: string
+  commit: CommitDot
+  files: CommitFile[]
+  files_changed: number
+}
+
+// -- insights (Parts 10 and 13) --------------------------------------------
+
+export interface Hotspot {
+  node_id: string
+  name: string
+  kind: NodeKind
+  path: string
+  category: 'structural' | 'churn' | 'complexity'
+  value: number
+  reason: string
+  evidence: string[]
+}
+
+export interface FlowStep {
+  depth: number
+  label: string
+  nodes: { id: string; name: string; path: string; kind: NodeKind }[]
+}
+
+export interface RepositoryFlow {
+  repository: string
+  entry_label: string
+  steps: FlowStep[]
+  node_ids: string[]
+}
+
+export interface Neighborhood {
+  node: GraphNode
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+  seeds: string[]
+  truncated: boolean
 }

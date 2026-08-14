@@ -11,6 +11,7 @@ import {
 import { cx, formatCount } from '@/lib/format'
 import * as graphApi from '@/lib/graphApi'
 import type { GraphNode } from '@/lib/graphTypes'
+import { useAppStore } from '@/store/useAppStore'
 import { useGraphStore } from '@/store/useGraphStore'
 import { AIChat } from './AIChat'
 import { CodeCells } from './CodeCell'
@@ -132,15 +133,19 @@ function RepositoryHeader() {
   const available = useGraphStore((s) => s.available)
   const repository = useGraphStore((s) => s.repository)
   const counts = useGraphStore((s) => s.counts)
-  const selectRepository = useGraphStore((s) => s.selectRepository)
   const loading = useGraphStore((s) => s.loading)
+  const highlight = useGraphStore((s) => s.highlight)
+  const clearHighlight = useGraphStore((s) => s.clearHighlight)
+  // Changing repository here has to move both views, or the conversation
+  // would keep answering about the one that is no longer on screen.
+  const selectRepositoryByName = useAppStore((s) => s.selectRepositoryByName)
 
   return (
     <div className="flex shrink-0 items-center gap-2 border-b border-hairline px-3 py-2">
       <IconLayers width={14} height={14} className="text-accent" />
       <select
         value={repository ?? ''}
-        onChange={(e) => void selectRepository(e.target.value)}
+        onChange={(e) => selectRepositoryByName(e.target.value)}
         className="h-7 rounded-md border border-hairline bg-canvas px-2 font-mono text-xs text-ink focus:border-accent/60"
       >
         {available.map((entry) => (
@@ -165,6 +170,12 @@ function RepositoryHeader() {
         </span>
       )}
 
+      {highlight.origin && (
+        <Button size="sm" onClick={clearHighlight} title="Clear the dependency highlight">
+          Clear highlight
+        </Button>
+      )}
+
       <div className="ml-auto">
         <GraphSearch />
       </div>
@@ -177,9 +188,14 @@ export function ExplorerView() {
   const error = useGraphStore((s) => s.error)
   const available = useGraphStore((s) => s.available)
   const repository = useGraphStore((s) => s.repository)
+  const asking = useAppStore((s) => s.asking)
+  const messages = useAppStore((s) => s.messages)
   const [panelOpen, setPanelOpen] = useState(true)
-  const [panelTab, setPanelTab] = useState<'details' | 'ask'>('details')
-  const asking = useGraphStore((s) => s.asking)
+  // Arriving with a conversation already going means the user came here from
+  // an answer; showing Details first would hide the thread they were reading.
+  const [panelTab, setPanelTab] = useState<'details' | 'ask'>(
+    messages.length > 0 ? 'ask' : 'details',
+  )
 
   useEffect(() => {
     void bootstrap()

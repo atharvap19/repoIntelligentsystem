@@ -6,9 +6,11 @@ import type { GraphNode as GraphNodeModel, NodeKind } from '@/lib/graphTypes'
 /** What React Flow carries on each node. */
 export interface FlowNodeData extends Record<string, unknown> {
   model: GraphNodeModel
-  emphasis: 'none' | 'dependency' | 'dependent' | 'origin'
+  emphasis: 'none' | 'dependency' | 'dependent' | 'origin' | 'flow'
   dimmed: boolean
   selected: boolean
+  /** 1-based position in a derived flow, when this node is part of one. */
+  flowStep?: number
 }
 
 const KIND_LABEL: Record<NodeKind, string> = {
@@ -50,7 +52,7 @@ function Metric({ label, value }: { label: string; value: string | number }) {
 }
 
 export const RepoGraphNode = memo(function RepoGraphNode({ data }: NodeProps) {
-  const { model, emphasis, dimmed, selected } = data as FlowNodeData
+  const { model, emphasis, dimmed, selected, flowStep } = data as FlowNodeData
   const kind = model.kind
   const info = model.data
   const isContainer = kind === 'repository' || kind === 'module' || kind === 'directory'
@@ -58,7 +60,7 @@ export const RepoGraphNode = memo(function RepoGraphNode({ data }: NodeProps) {
   const accent =
     emphasis === 'dependency'
       ? 'rgb(var(--c-signal))'
-      : emphasis === 'dependent'
+      : emphasis === 'dependent' || emphasis === 'flow'
         ? 'rgb(var(--c-accent))'
         : KIND_ACCENT[kind]
 
@@ -71,6 +73,7 @@ export const RepoGraphNode = memo(function RepoGraphNode({ data }: NodeProps) {
         emphasis === 'origin' && 'border-accent ring-2 ring-accent/60',
         emphasis === 'dependency' && 'border-signal/70',
         emphasis === 'dependent' && 'border-accent/70',
+        emphasis === 'flow' && 'border-accent/70 ring-1 ring-accent/40',
         dimmed && 'opacity-25',
       )}
       style={{ borderLeftColor: accent, borderLeftWidth: 3 }}
@@ -79,6 +82,13 @@ export const RepoGraphNode = memo(function RepoGraphNode({ data }: NodeProps) {
       <Handle type="target" position={Position.Top} className="!h-1 !w-1 !border-0 !bg-transparent" />
 
       <div className="flex items-center gap-1.5">
+        {/* Ordinal, not decoration: a flow is a sequence, and the arrows alone
+            do not say which end it starts at. */}
+        {flowStep != null && (
+          <span className="grid h-3.5 w-3.5 shrink-0 place-items-center rounded-full bg-accent text-[0.55rem] font-bold text-canvas">
+            {flowStep}
+          </span>
+        )}
         <span className="text-[0.58rem] uppercase tracking-[0.12em] text-faint">
           {KIND_LABEL[kind]}
         </span>

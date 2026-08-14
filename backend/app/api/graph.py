@@ -53,6 +53,79 @@ def timeline(repository: str):
     return _guard(lambda: service.timeline(repository))
 
 
+@router.get("/{repository}/commits")
+def commits(
+    repository: str,
+    limit: int = Query(60, ge=1, le=300),
+):
+    """Commits as timeline dots, oldest first, with file counts and releases."""
+    return _guard(lambda: service.commit_timeline(repository, limit=limit))
+
+
+@router.get("/{repository}/commit")
+def commit_detail(repository: str, sha: str = Query(..., min_length=4)):
+    """One commit: author, date, message, and the files it changed."""
+    return _guard(lambda: service.commit_detail(repository, sha))
+
+
+@router.get("/{repository}/commit/snapshot")
+def commit_snapshot(repository: str, sha: str = Query(..., min_length=4)):
+    """Approximate repository state as of a commit."""
+    return _guard(lambda: service.snapshot_at_commit(repository, sha))
+
+
+@router.get("/{repository}/changes")
+def changes(
+    repository: str,
+    from_sha: str = Query(..., min_length=4),
+    to_sha: str = Query(..., min_length=4),
+):
+    """What changed between two commits."""
+    return _guard(lambda: service.changes_between(repository, from_sha, to_sha))
+
+
+@router.get("/{repository}/hotspots")
+def hotspots(repository: str, limit: int = Query(8, ge=1, le=30)):
+    """Most depended-on, most changed and largest files, each with evidence."""
+    return {"hotspots": _guard(lambda: service.hotspots(repository, limit=limit))}
+
+
+@router.get("/{repository}/flow")
+def flow(
+    repository: str,
+    node_id: str | None = Query(None, description="Start here instead of guessing"),
+):
+    """A static path through the import graph from an entry point."""
+    return _guard(lambda: service.flow(repository, node_id))
+
+
+@router.get("/nodes")
+def node_set(id: list[str] = Query(..., description="Repeat once per node")):
+    """A named set of nodes and the edges among them.
+
+    For views that legitimately cross hierarchy levels — a derived flow spans
+    several directories — where expanding one parent would show part of the
+    answer and hide the rest.
+    """
+    return _guard(lambda: service.node_set(id))
+
+
+@router.get("/node/path")
+def node_path(node_id: str = Query(...)):
+    """Ancestors from the repository root down to this node, root first."""
+    return {"path": _guard(lambda: service.ancestors(node_id))}
+
+
+@router.get("/node/neighborhood")
+def neighborhood(
+    node_id: str = Query(...),
+    hops: int = Query(1, ge=1, le=3),
+    limit: int = Query(40, ge=1, le=120),
+):
+    """The bounded subgraph around a node — what [Explore this] renders."""
+    return _guard(lambda: service.neighborhood(node_id, hops=hops, limit=limit))
+
+
 @router.get("/{repository}/snapshot")
 def snapshot(
     repository: str,

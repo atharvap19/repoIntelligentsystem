@@ -1,12 +1,16 @@
 import { create } from 'zustand'
 import * as api from '@/lib/graphApi'
 import type {
-  AgentResponse,
+  CommitDetail,
+  CommitTimeline,
   DependencyResult,
+  ExplorerContextPayload,
   FileContent,
   GraphEdge,
   GraphNode,
+  NavigationTarget,
   NodeDetail,
+  RepositoryFlow,
   Snapshot,
   Timeline,
   UiAction,
@@ -21,19 +25,6 @@ export interface OpenFile {
   loading: boolean
   error: string | null
   collapsed: boolean
-}
-
-/** One turn in the Explorer's AI conversation. */
-export interface AgentTurn {
-  id: string
-  role: 'user' | 'assistant'
-  text: string
-  intent?: string
-  confidence?: number
-  focusLabel?: string | null
-  sources?: import('@/lib/types').Source[]
-  pending?: boolean
-  error?: string | null
 }
 
 interface GraphState {
@@ -55,10 +46,16 @@ interface GraphState {
 
   /** Node IDs to emphasise, and the ones to dim, for dependency highlighting. */
   highlight: { dependencies: Set<string>; dependents: Set<string>; origin: string | null }
+  /** An ordered chain from a flow answer, drawn as a path through the graph. */
+  flow: RepositoryFlow | null
 
   openFiles: OpenFile[]
 
   timeline: Timeline | null
+  /** Commit dots (Part 11). Separate from `timeline`, which is module activity. */
+  commits: CommitTimeline | null
+  /** The commit being viewed, or null for the live repository. */
+  commit: CommitDetail | null
   /** Unix seconds. `null` means "now" — the live graph, not a snapshot. */
   cursor: number | null
   snapshot: Snapshot | null
@@ -66,12 +63,6 @@ interface GraphState {
   loading: boolean
   error: string | null
   counts: Record<string, number>
-
-  /** Explorer-side AI conversation, separate from the Chat tab's history. */
-  turns: AgentTurn[]
-  asking: boolean
-  ask: (question: string) => Promise<void>
-  clearConversation: () => void
 
   bootstrap: () => Promise<void>
   selectRepository: (repository: string) => Promise<void>
@@ -85,8 +76,15 @@ interface GraphState {
   closeFile: (nodeId: string) => void
   toggleFileCollapsed: (nodeId: string) => void
   setCursor: (timestamp: number | null) => Promise<void>
+  selectCommit: (sha: string | null) => Promise<void>
+  /** Render a derived flow as an ordered chain across hierarchy levels. */
+  showFlow: (startNodeId?: string) => Promise<void>
   applyAgentAction: (action: UiAction | null) => Promise<void>
+  applyNavigation: (target: NavigationTarget) => Promise<void>
+  revealNode: (nodeId: string) => Promise<void>
   focusById: (nodeId: string) => Promise<void>
+  /** What the user currently has open, for the agent's context (Part 3). */
+  explorerContext: () => ExplorerContextPayload
 }
 
 const EMPTY_HIGHLIGHT = {
@@ -96,7 +94,6 @@ const EMPTY_HIGHLIGHT = {
 }
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err))
-const uid = () => Math.random().toString(36).slice(2, 10)
 
 export const useGraphStore = create<GraphState>((set, get) => ({
   repository: null,
@@ -111,59 +108,49 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   detail: null,
   dependencies: null,
   highlight: EMPTY_HIGHLIGHT,
+  flow: null,
   openFiles: [],
   timeline: null,
+  commits: null,
+  commit: null,
   cursor: null,
   snapshot: null,
   loading: false,
   error: null,
   counts: {},
-  turns: [],
-  asking: false,
 
   /**
-   * Ask the LangGraph agent, then let its `ui_action` drive the graph — this
-   * is what makes "what depends on this?" highlight rather than merely
-   * describe.
+   * Describe the current selection for the agent.
+   *
+   * This is the whole of Part 3 on the client side: the question travels with
+   * what the user is looking at, so "explain this" needs no antecedent in the
+   * text. Both the Chat view and the Explorer sidebar read it — in Chat it is
+   * usually near-empty, which is correct.
    */
-  async ask(question) {
-    const trimmed = question.trim()
-    const { repository, asking } = get()
-    if (!trimmed || !repository || asking) return
+  explorerContext() {
+    const { repository, selected, path, openFiles, highlight, commit } = get()
 
-    const pendingId = uid()
-    set((s) => ({
-      asking: true,
-      turns: [
-        ...s.turns,
-        { id: uid(), role: 'user', text: trimmed },
-        { id: pendingId, role: 'assistant', text: '', pending: true },
-      ],
-    }))
+    const file =
+      selected?.kind === 'file'
+        ? selected.key
+        : (selected?.data.relative_path ?? openFiles[0]?.path ?? '')
+    const symbol =
+      selected && selected.kind !== 'file' && selected.kind !== 'module'
+        ? selected.name
+        : ''
 
-    const resolve = (patch: Partial<AgentTurn>) =>
-      set((s) => ({
-        asking: false,
-        turns: s.turns.map((t) => (t.id === pendingId ? { ...t, pending: false, ...patch } : t)),
-      }))
-
-    try {
-      const response: AgentResponse = await api.askAgent(trimmed, repository, `explorer:${repository}`)
-      resolve({
-        text: response.answer,
-        intent: response.intent,
-        confidence: response.confidence,
-        focusLabel: response.focus?.label ?? null,
-        sources: response.sources,
-      })
-      await get().applyAgentAction(response.ui_action)
-    } catch (err) {
-      resolve({ error: message(err) })
+    return {
+      repository: repository ?? '',
+      // The breadcrumb's module level, which is where the user actually is
+      // even when nothing is selected.
+      module: selected?.data.module ?? path[1]?.name ?? '',
+      file,
+      symbol,
+      node_id: selected?.id ?? '',
+      focus_node_ids: highlight.origin ? [highlight.origin] : [],
+      commit_sha: commit?.commit.sha ?? '',
+      timestamp: get().cursor,
     }
-  },
-
-  clearConversation() {
-    set({ turns: [] })
   },
 
   async bootstrap() {
@@ -179,6 +166,8 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   },
 
   async selectRepository(repository) {
+    if (get().repository === repository && get().focus) return
+
     set({
       repository,
       loading: true,
@@ -190,17 +179,20 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       detail: null,
       dependencies: null,
       highlight: EMPTY_HIGHLIGHT,
+      flow: null,
       openFiles: [],
       cursor: null,
       snapshot: null,
-      turns: [],
+      commit: null,
     })
     try {
-      const [overview, timeline] = await Promise.all([
+      const [overview, timeline, commits] = await Promise.all([
         api.fetchOverview(repository),
-        // A repository with no git history still has a graph; the timeline
-        // is optional decoration, so its failure must not blank the view.
+        // A repository with no git history still has a graph; both history
+        // views are optional decoration, so their failure must not blank the
+        // structure.
         api.fetchTimeline(repository).catch(() => null),
+        api.fetchCommits(repository).catch(() => null),
       ])
       set({
         focus: overview.root,
@@ -209,6 +201,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         edges: overview.edges,
         counts: overview.counts,
         timeline,
+        commits,
         truncated: false,
         totalChildren: overview.nodes.length,
         loading: false,
@@ -254,6 +247,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     if (!target || !repository) return
 
     if (index === 0) {
+      set({ repository: null })
       await get().selectRepository(repository)
       return
     }
@@ -309,7 +303,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   },
 
   clearHighlight() {
-    set({ highlight: EMPTY_HIGHLIGHT })
+    set({ highlight: EMPTY_HIGHLIGHT, flow: null })
   },
 
   async openFile(nodeId, name, path) {
@@ -380,7 +374,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     if (!repository) return
 
     if (timestamp === null) {
-      set({ cursor: null, snapshot: null })
+      set({ cursor: null, snapshot: null, commit: null, repository: null })
       await get().selectRepository(repository)
       return
     }
@@ -405,6 +399,48 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     }
   },
 
+  /**
+   * Move the repository to the state at a commit (Part 11).
+   *
+   * The commit detail and the snapshot are fetched together: the detail names
+   * what changed and the snapshot is what the graph shows, and displaying one
+   * without the other leaves the header describing a view that is not on
+   * screen yet.
+   */
+  async selectCommit(sha) {
+    const { repository } = get()
+    if (!repository) return
+
+    if (sha === null) {
+      set({ commit: null, cursor: null, snapshot: null, repository: null })
+      await get().selectRepository(repository)
+      return
+    }
+
+    set({ loading: true, error: null })
+    try {
+      const [detail, snapshot] = await Promise.all([
+        api.fetchCommit(repository, sha),
+        api.fetchCommitSnapshot(repository, sha),
+      ])
+      set({
+        commit: detail,
+        cursor: detail.commit.authored_at,
+        snapshot,
+        focus: snapshot.root,
+        path: snapshot.root ? [snapshot.root] : [],
+        nodes: snapshot.nodes,
+        edges: snapshot.edges,
+        truncated: false,
+        totalChildren: snapshot.nodes.length,
+        highlight: EMPTY_HIGHLIGHT,
+        loading: false,
+      })
+    } catch (err) {
+      set({ loading: false, error: message(err) })
+    }
+  },
+
   async applyAgentAction(action) {
     if (!action) return
     if (action.type === 'open_file') {
@@ -417,9 +453,160 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       await get().showDependencies(action.node_id)
       return
     }
+    if (action.type === 'show_flow') {
+      await get().showFlow(action.node_ids[0])
+      return
+    }
     if (action.type === 'show_structure') {
       const { repository } = get()
-      if (repository) await get().selectRepository(repository)
+      if (repository) {
+        set({ repository: null })
+        await get().selectRepository(repository)
+      }
+    }
+  },
+
+  /**
+   * Act on a structured navigation target — what [Explore this] does.
+   *
+   * Switching to the Explorer view is the caller's job, not this store's: the
+   * view flag lives in the app store, and reaching across for it here would
+   * make the two stores mutually dependent.
+   */
+  async applyNavigation(target) {
+    if (!target.available) return
+    const { repository } = get()
+
+    if (target.repository && target.repository !== repository) {
+      await get().selectRepository(target.repository)
+    }
+
+    if (target.focus_mode === 'flow') {
+      await get().showFlow(target.node_id)
+      return
+    }
+
+    if (target.focus_mode === 'timeline') {
+      if (target.commit_sha) await get().selectCommit(target.commit_sha)
+      // Otherwise the timeline is already on screen; the file below is what
+      // gives it something to be about.
+      if (target.node_id) await get().revealNode(target.node_id)
+      return
+    }
+
+    if (target.target_type === 'architecture' || target.target_type === 'repository') {
+      const name = target.repository || repository
+      if (name) {
+        set({ repository: null })
+        await get().selectRepository(name)
+      }
+      return
+    }
+
+    if (!target.node_id) return
+
+    await get().revealNode(target.node_id)
+
+    if (target.focus_mode === 'neighborhood') {
+      await get().showDependencies(target.node_id)
+    }
+    if (target.target_type === 'file' && target.file) {
+      await get().openFile(target.node_id, target.file.split('/').pop(), target.file)
+    }
+  },
+
+  /**
+   * Draw a derived flow as its own view.
+   *
+   * A flow cannot be shown by expanding a parent, which is how every other
+   * view here works. Its nodes deliberately cross levels — for a FastAPI-style
+   * layout the chain runs `backend/main.py -> backend/routes/auth.py ->
+   * backend/services/auth_service.py`, three different parents — so expanding
+   * the common ancestor renders the first two files and silently drops the
+   * rest. The set is fetched by name instead.
+   *
+   * The flow is re-fetched rather than rebuilt from the navigation target
+   * because the target is flat, and the step *depths* are what the numbering
+   * has to be truthful about.
+   */
+  async showFlow(startNodeId) {
+    const { repository } = get()
+    if (!repository) return
+
+    set({ loading: true, error: null })
+    try {
+      const flow = await api.fetchFlow(repository, startNodeId || undefined)
+      if (!flow.node_ids.length) {
+        set({ loading: false })
+        return
+      }
+
+      const [{ nodes, edges }, { path }] = await Promise.all([
+        api.fetchNodeSet(flow.node_ids),
+        // The breadcrumb still needs somewhere to be, and the layout needs a
+        // container card to hang the chain beneath.
+        api.fetchNodePath(flow.node_ids[0]),
+      ])
+
+      const container = path[path.length - 2] ?? path[0] ?? null
+      set({
+        flow,
+        focus: container,
+        path: container ? path.slice(0, path.length - 1) : [],
+        nodes,
+        edges,
+        truncated: false,
+        totalChildren: nodes.length,
+        highlight: EMPTY_HIGHLIGHT,
+        loading: false,
+      })
+    } catch (err) {
+      set({ loading: false, error: message(err) })
+    }
+  },
+
+  /**
+   * Bring a node on screen wherever it sits in the hierarchy.
+   *
+   * The Explorer renders one level at a time, so selecting a deep node is not
+   * enough — its parent has to be the level on screen and the breadcrumb has
+   * to match, or the user lands somewhere with no way back up. The ancestor
+   * chain comes from the backend in one call rather than by walking parents.
+   */
+  async revealNode(nodeId) {
+    set({ loading: true, error: null })
+    try {
+      const { path } = await api.fetchNodePath(nodeId)
+      const target = path[path.length - 1]
+      if (!target) {
+        set({ loading: false })
+        return
+      }
+
+      // Symbols are not laid out as their own level; show the file that holds
+      // them and select the symbol inside it.
+      const container = [...path]
+        .reverse()
+        .find((n) => n.kind !== 'file' && n.id !== target.id)
+      const parent = container ?? path[path.length - 2]
+
+      if (parent) {
+        const expansion = await api.expandNode(parent.id)
+        const index = path.findIndex((n) => n.id === parent.id)
+        set({
+          focus: expansion.node,
+          path: path.slice(0, index + 1),
+          nodes: expansion.nodes,
+          edges: expansion.edges,
+          truncated: expansion.truncated,
+          totalChildren: expansion.total_children,
+        })
+      }
+
+      set({ loading: false })
+      await get().selectNode(target)
+    } catch (err) {
+      set({ loading: false, error: message(err) })
     }
   },
 

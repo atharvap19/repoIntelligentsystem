@@ -79,6 +79,18 @@ export interface Message {
   pending?: boolean
   repositoryId?: string
   createdAt: number
+
+  /** Router intent and its confidence, once the agent answers. */
+  intent?: string
+  confidence?: number
+  /** What the turn resolved "it"/"this" to. */
+  focusLabel?: string | null
+  /** Structured exploration target — drives the optional [Explore this]. */
+  navigation?: import('./graphTypes').NavigationTarget | null
+  /** Graph action to apply when the user is already in Explorer. */
+  uiAction?: import('./graphTypes').UiAction | null
+  /** How much evidence of each kind reached the prompt. */
+  contextStats?: Record<string, number>
 }
 
 export interface RunSettings {

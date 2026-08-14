@@ -41,6 +41,11 @@ DEFAULT_CHILD_LIMIT = 120
 #: Bytes of file content served in one response.
 MAX_CONTENT_BYTES = 400_000
 
+#: Nodes returned by an explicit set request. A flow is at most a few dozen
+#: nodes; anything larger is a caller trying to fetch the graph one list at a
+#: time, which is what the level-by-level design exists to prevent.
+MAX_NODE_SET = 60
+
 SYMBOL_KINDS = (NODE_CLASS, NODE_FUNCTION, NODE_METHOD)
 CONTAINER_KINDS = (NODE_MODULE, NODE_DIRECTORY, NODE_FILE)
 
@@ -230,6 +235,62 @@ class GraphService:
 
         return detail
 
+    def node_set(self, node_ids: list[str]) -> dict:
+        """An arbitrary set of nodes, plus the edges among them.
+
+        Every other read here is scoped to one level of the hierarchy, because
+        that is how the Explorer draws. A *flow* is the exception: it crosses
+        levels by nature — ``backend/main.py`` sits beside ``backend/routes/
+        auth.py``, one level deeper — so expanding a common parent shows some
+        of the chain and silently omits the rest.
+
+        This is deliberately not a "load the graph" endpoint. The caller must
+        already know exactly which nodes it wants, and the set is capped.
+        """
+        nodes = self.store.nodes_by_ids(node_ids[:MAX_NODE_SET])
+        # Preserve the caller's order: a flow's steps are meaningful, and
+        # SQLite's `IN` returns rows in storage order.
+        position = {node_id: index for index, node_id in enumerate(node_ids)}
+        nodes.sort(key=lambda n: position.get(n["id"], len(position)))
+
+        present = {n["id"] for n in nodes}
+        edges = [
+            edge
+            for node in nodes
+            for edge in self.store.outgoing(node["id"], kinds=[EDGE_IMPORTS, EDGE_DEPENDS_ON])
+            if edge["target"] in present
+        ]
+        return {"nodes": nodes, "edges": edges, "requested": len(node_ids)}
+
+    def ancestors(self, node_id: str) -> list[dict]:
+        """The chain from the repository root down to ``node_id``, root first.
+
+        Exists for navigation. A [Explore this] click lands on a node the user
+        has not drilled to, and the Explorer renders one level at a time — so
+        it needs the whole breadcrumb, not just the node. Walking parents in
+        the client would be one request per level; this is one request.
+        """
+        node = self.store.get_node(node_id)
+        if node is None:
+            raise GraphNotFoundError(f"Node {node_id!r} not found.")
+
+        chain = [node]
+        seen = {node_id}
+        parent_id = node.get("parent_id")
+
+        # Bounded and cycle-guarded: the hierarchy is five levels deep, and a
+        # malformed parent link must not spin here.
+        while parent_id and parent_id not in seen and len(chain) < 12:
+            parent = self.store.get_node(parent_id)
+            if parent is None:
+                break
+            seen.add(parent_id)
+            chain.append(parent)
+            parent_id = parent.get("parent_id")
+
+        chain.reverse()
+        return chain
+
     def dependencies(self, node_id: str) -> dict:
         """What this node depends on, and what depends on it.
 
@@ -369,6 +430,181 @@ class GraphService:
                 r for r in self.store.refs(repository, "tag") if r.get("created_at")
             ][-40:],
             "branches": self.store.refs(repository, "branch"),
+        }
+
+    def commit_timeline(self, repository: str, limit: int = 60) -> dict:
+        """Commits as dots on a line — the Part 11 timeline.
+
+        Returned oldest-first because the UI draws left to right, while the
+        store returns newest-first (the natural order for "recent commits").
+        Reversing once here keeps that decision out of the component.
+
+        ``lanes`` from :meth:`timeline` is deliberately *not* merged in. Module
+        activity and commit dots answer different questions, and the frontend
+        shows them in different places; joining them here would force one to
+        change whenever the other did.
+        """
+        if not self.store.has_repository(repository):
+            raise GraphNotFoundError(f"Repository {repository!r} has no graph.")
+
+        commits = self.store.commits(repository, limit=limit)
+        releases = {
+            ref["sha"]: ref["name"]
+            for ref in self.store.refs(repository, "tag")
+            if ref.get("sha")
+        }
+
+        dots = [
+            {
+                "sha": commit["sha"],
+                "short_sha": commit["sha"][:8],
+                "author": commit["author"] or "unknown",
+                "authored_at": commit["authored_at"],
+                "summary": commit["summary"] or "",
+                "files_changed": commit["file_count"],
+                "is_merge": bool(commit["is_merge"]),
+                # Merge dots branch off the trunk in the drawing; tagged
+                # commits get a release marker.
+                "release": releases.get(commit["sha"], ""),
+            }
+            for commit in reversed(commits)
+        ]
+
+        return {
+            "repository": repository,
+            "commits": dots,
+            "range": self.store.commit_range(repository),
+            "truncated": len(commits) >= limit,
+        }
+
+    def commit_detail(self, repository: str, sha: str) -> dict:
+        """One commit with the files it touched, resolved onto graph nodes.
+
+        Resolving to node IDs is what makes a commit clickable: the frontend
+        can select the changed files in the graph without a second round trip
+        per file. Paths with no node are still listed — history covers files
+        the parser excludes, and hiding them would misreport the commit.
+        """
+        commit = self.store.commit(repository, sha)
+        if commit is None:
+            raise GraphNotFoundError(f"Commit {sha!r} is not in the indexed history.")
+
+        files = self.store.files_in_commit(repository, commit["sha"])
+        nodes = {
+            node["key"]: node["id"]
+            for node in self.store.nodes_by_ids(
+                [f"{repository}::{NODE_FILE}::{f['relative_path']}" for f in files]
+            )
+        }
+
+        return {
+            "repository": repository,
+            "commit": {
+                **commit,
+                "short_sha": commit["sha"][:8],
+                "is_merge": bool(commit["is_merge"]),
+            },
+            "files": [
+                {
+                    "relative_path": f["relative_path"],
+                    "module": f["module"] or "",
+                    "change_type": f["change_type"] or "M",
+                    "node_id": nodes.get(f["relative_path"], ""),
+                    "indexed": f["relative_path"] in nodes,
+                }
+                for f in files
+            ],
+            "files_changed": len(files),
+        }
+
+    def snapshot_at_commit(self, repository: str, sha: str) -> dict:
+        """Repository state as of a commit — the timeline's click target.
+
+        Delegates to the timestamp-based :meth:`snapshot` rather than
+        reconstructing a tree. Same approximation, same caveat, and the commit
+        is echoed back so the UI can label what it is showing.
+        """
+        commit = self.store.commit(repository, sha)
+        if commit is None:
+            raise GraphNotFoundError(f"Commit {sha!r} is not in the indexed history.")
+
+        result = self.snapshot(repository, int(commit["authored_at"]))
+        result["commit"] = {
+            **commit,
+            "short_sha": commit["sha"][:8],
+            "is_merge": bool(commit["is_merge"]),
+        }
+        return result
+
+    def changes_between(self, repository: str, start_sha: str, end_sha: str) -> dict:
+        """What changed between two commits (Part 12).
+
+        Both endpoints are resolved to timestamps and the window is scanned
+        forward, so the arguments can be given in either order.
+        """
+        start = self.store.commit(repository, start_sha)
+        end = self.store.commit(repository, end_sha)
+        if start is None or end is None:
+            raise GraphNotFoundError("One or both commits are not in the indexed history.")
+
+        low, high = sorted((int(start["authored_at"]), int(end["authored_at"])))
+        changes = self.store.changes_between(repository, low, high)
+
+        modules: dict[str, int] = {}
+        for change in changes:
+            module = change["module"] or "(root)"
+            modules[module] = modules.get(module, 0) + change["commits"]
+
+        return {
+            "repository": repository,
+            "from": {**start, "short_sha": start["sha"][:8]},
+            "to": {**end, "short_sha": end["sha"][:8]},
+            "files": changes[:60],
+            "files_touched": len(changes),
+            "modules": sorted(modules.items(), key=lambda kv: -kv[1]),
+        }
+
+    # -- insights ----------------------------------------------------------
+
+    def hotspots(self, repository: str, limit: int = 8) -> list[dict]:
+        """Structural, churn and complexity hotspots, each with its evidence."""
+        if not self.store.has_repository(repository):
+            raise GraphNotFoundError(f"Repository {repository!r} has no graph.")
+        from app.graph.insights import InsightAnalyzer
+
+        return [h.to_dict() for h in InsightAnalyzer(self.store).hotspots(repository, limit)]
+
+    def flow(self, repository: str, start_node_id: str | None = None) -> dict:
+        """A static path through the import graph from an entry point."""
+        if not self.store.has_repository(repository):
+            raise GraphNotFoundError(f"Repository {repository!r} has no graph.")
+        from app.graph.insights import InsightAnalyzer
+
+        return InsightAnalyzer(self.store).flow(repository, start_node_id).to_dict()
+
+    def neighborhood(self, node_id: str, hops: int = 1, limit: int = 40) -> dict:
+        """Nodes and edges within ``hops`` of one node, for focused rendering.
+
+        This is what an [Explore this] click loads: enough of the graph to
+        show why the answer named this node, and no more. It is the same
+        traversal the agent uses to build context, exposed so the picture and
+        the prose come from one source.
+        """
+        from app.rag.graph_retriever import GraphRetriever
+
+        node = self.store.get_node(node_id)
+        if node is None:
+            raise GraphNotFoundError(f"Node {node_id!r} not found.")
+
+        context = GraphRetriever(self, node_budget=limit, hops=hops).retrieve(
+            repository=node["repository"], focus_node_id=node_id, hops=hops
+        )
+        return {
+            "node": node,
+            "nodes": [hit.node for hit in context.hits],
+            "edges": context.edges,
+            "seeds": context.seeds,
+            "truncated": bool(context.withheld),
         }
 
     def snapshot(self, repository: str, timestamp: int) -> dict:

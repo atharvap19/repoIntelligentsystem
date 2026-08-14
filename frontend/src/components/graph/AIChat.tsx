@@ -6,10 +6,12 @@ import { Button } from '@/components/common/Button'
 import { Tag, Thinking } from '@/components/common/Bits'
 import { IconFile, IconRefresh, IconSend, IconWarn } from '@/components/common/Icons'
 import { cx } from '@/lib/format'
-import { useGraphStore, type AgentTurn } from '@/store/useGraphStore'
+import type { Message } from '@/lib/types'
+import { useAppStore } from '@/store/useAppStore'
+import { useGraphStore } from '@/store/useGraphStore'
 
 /** Human-readable labels for the router's intents. */
-const INTENT_LABEL: Record<string, string> = {
+export const INTENT_LABEL: Record<string, string> = {
   repository_search: 'search',
   code_explanation: 'explain',
   architecture_analysis: 'architecture',
@@ -17,25 +19,29 @@ const INTENT_LABEL: Record<string, string> = {
   dependency_analysis: 'dependencies',
   file_analysis: 'file',
   git_history_analysis: 'history',
-  code_generation: 'codegen',
+  flow_analysis: 'flow',
+  concept_analysis: 'concept',
+  hotspot_analysis: 'hotspots',
+  readonly_request: 'read-only',
 }
 
 /** Questions that each exercise a different branch of the router. */
 const STARTERS = [
   'What is this repository about?',
   'Explain the architecture.',
-  'Show me the repository structure.',
-  'What changed recently?',
+  'How does a request flow through this repository?',
+  'Which files are most depended on?',
 ]
 
-function Turn({ turn }: { turn: AgentTurn }) {
+function Turn({ turn }: { turn: Message }) {
   const openFile = useGraphStore((s) => s.openFile)
+  const applyNavigation = useGraphStore((s) => s.applyNavigation)
 
   if (turn.role === 'user') {
     return (
       <div className="px-3 pt-3">
         <p className="whitespace-pre-wrap text-[0.8125rem] font-medium leading-relaxed text-ink">
-          {turn.text}
+          {turn.content}
         </p>
       </div>
     )
@@ -45,7 +51,7 @@ function Turn({ turn }: { turn: AgentTurn }) {
     return (
       <div className="flex items-center gap-2 px-3 py-2 text-2xs text-muted">
         <Thinking />
-        <span>Routing and generating — this runs locally and takes a few minutes.</span>
+        <span>Retrieving, reading the graph and generating — this runs locally.</span>
       </div>
     )
   }
@@ -62,18 +68,31 @@ function Turn({ turn }: { turn: AgentTurn }) {
   return (
     <div className="px-3 pb-3 pt-1.5">
       <div className="mb-1.5 flex flex-wrap items-center gap-1">
-        {turn.intent && (
-          <Tag tone="accent">{INTENT_LABEL[turn.intent] ?? turn.intent}</Tag>
-        )}
+        {turn.intent && <Tag tone="accent">{INTENT_LABEL[turn.intent] ?? turn.intent}</Tag>}
         {turn.confidence != null && <Tag>conf {turn.confidence.toFixed(2)}</Tag>}
         {turn.focusLabel && <Tag tone="signal">{turn.focusLabel}</Tag>}
+        {turn.contextStats?.graph_nodes ? (
+          <Tag>{turn.contextStats.graph_nodes} graph nodes</Tag>
+        ) : null}
       </div>
 
       <div className="answer text-[0.8125rem] [&_pre]:text-[0.7rem]">
         <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-          {turn.text}
+          {turn.content}
         </ReactMarkdown>
       </div>
+
+      {/* Already in Explorer, so this moves the graph rather than switching
+          views — the same target, one step shorter. */}
+      {turn.navigation?.available && (
+        <button
+          type="button"
+          onClick={() => void applyNavigation(turn.navigation!)}
+          className="mt-2 w-full rounded border border-accent/40 bg-accent/[0.07] px-2 py-1.5 text-left text-2xs text-accent transition-colors hover:bg-accent/10"
+        >
+          {turn.navigation.label} →
+        </button>
+      )}
 
       {turn.sources && turn.sources.length > 0 && (
         <div className="mt-2 border-t border-hairline pt-1.5">
@@ -112,11 +131,19 @@ function Turn({ turn }: { turn: AgentTurn }) {
   )
 }
 
+/**
+ * The Explorer's view of the conversation.
+ *
+ * Not a second chat: it renders `useAppStore.messages`, the same array the
+ * Chat view renders. Switching views changes the layout around the thread and
+ * nothing else, which is what Part 4 asks for — and it is why asking here and
+ * then switching to Chat shows the answer already there.
+ */
 export function AIChat() {
-  const turns = useGraphStore((s) => s.turns)
-  const asking = useGraphStore((s) => s.asking)
-  const ask = useGraphStore((s) => s.ask)
-  const clear = useGraphStore((s) => s.clearConversation)
+  const messages = useAppStore((s) => s.messages)
+  const asking = useAppStore((s) => s.asking)
+  const ask = useAppStore((s) => s.ask)
+  const clear = useAppStore((s) => s.clearConversation)
   const repository = useGraphStore((s) => s.repository)
   const selected = useGraphStore((s) => s.selected)
 
@@ -125,7 +152,7 @@ export function AIChat() {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
-  }, [turns])
+  }, [messages])
 
   function submit() {
     const question = value.trim()
@@ -138,7 +165,7 @@ export function AIChat() {
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 items-center gap-1.5 border-b border-hairline px-3 py-1.5">
         <span className="truncate font-mono text-2xs text-muted">{repository}</span>
-        {turns.length > 0 && (
+        {messages.length > 0 && (
           <Button size="sm" className="ml-auto" onClick={clear} title="Clear conversation">
             <IconRefresh width={11} height={11} />
             New
@@ -147,12 +174,12 @@ export function AIChat() {
       </div>
 
       <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
-        {turns.length === 0 ? (
+        {messages.length === 0 ? (
           <div className="p-3">
             <p className="text-2xs leading-relaxed text-faint">
-              Answers here route through the graph, so structural questions are answered from
-              static analysis rather than guessed from retrieved text. Selecting a node first
-              lets follow-ups say &ldquo;it&rdquo;.
+              Answers combine vector search, keyword search and the repository graph. Selecting a
+              node first lets follow-ups just say &ldquo;this&rdquo;. This is the same conversation
+              as the Chat tab.
             </p>
             <div className="mt-2.5 space-y-1">
               {STARTERS.map((starter) => (
@@ -168,7 +195,7 @@ export function AIChat() {
               {selected && (
                 <button
                   type="button"
-                  onClick={() => void ask(`What depends on ${selected.name}?`)}
+                  onClick={() => void ask('What depends on this?')}
                   className="w-full rounded border border-accent/40 bg-accent/[0.07] px-2 py-1.5 text-left text-2xs text-accent transition-colors hover:bg-accent/10"
                 >
                   What depends on {selected.name}?
@@ -178,7 +205,7 @@ export function AIChat() {
           </div>
         ) : (
           <>
-            {turns.map((turn) => (
+            {messages.map((turn) => (
               <Turn key={turn.id} turn={turn} />
             ))}
             <div ref={bottomRef} />
@@ -187,6 +214,12 @@ export function AIChat() {
       </div>
 
       <div className="shrink-0 border-t border-hairline p-2">
+        {selected && (
+          <div className="mb-1.5 flex items-center gap-1 px-0.5 text-[0.58rem] text-faint">
+            <span className="uppercase tracking-wide">asking about</span>
+            <span className="truncate font-mono text-accent">{selected.name}</span>
+          </div>
+        )}
         <div
           className={cx(
             'flex items-end gap-1.5 rounded-lg border bg-canvas px-2 py-1.5 transition-colors',

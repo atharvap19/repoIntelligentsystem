@@ -1,12 +1,13 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/common/Button'
 import { Tag } from '@/components/common/Bits'
 import { IconRefresh } from '@/components/common/Icons'
 import { cx } from '@/lib/format'
+import type { CommitDot } from '@/lib/graphTypes'
 import { useGraphStore } from '@/store/useGraphStore'
 
-const LANE_HEIGHT = 22
-const MAX_LANES = 7
+const DOT = 9
+const MERGE_LANE = 15
 
 function formatDate(seconds: number | null | undefined): string {
   if (!seconds) return '—'
@@ -18,35 +19,120 @@ function formatDate(seconds: number | null | undefined): string {
 }
 
 /**
- * Module-activity timeline with a draggable cursor.
+ * Commit history, drawn the way a code host draws it.
  *
- * Lanes are modules, not git branches: a clone has one local branch and the
- * branch graph says little about how a codebase grew, whereas module activity
- * says a great deal. Each lane's bars are commits-per-month in that module.
+ * Phase 3 had a module-activity heatmap with a draggable cursor. It showed
+ * *when* modules were busy but never *what happened*, so the answer to "what
+ * changed here?" was a date rather than a commit. Part 11 asks for dots on a
+ * line: each dot is a real commit, clicking one moves the repository to that
+ * state, and hovering one names the author, the message and the file count.
+ *
+ * Dots are evenly spaced rather than placed by timestamp. Real history is
+ * bursty — a week of daily commits then three months of silence — and time
+ * spacing collapses the busy weeks into an unclickable smear. Even spacing
+ * keeps every commit reachable; the date labels carry the real chronology.
+ *
+ * Merges sit on a second lane below the trunk, which is the visual convention
+ * the brief's sketch shows and reads correctly even without colour.
  */
+function CommitTooltip({ commit }: { commit: CommitDot }) {
+  return (
+    <div className="pointer-events-none absolute bottom-full left-1/2 z-30 mb-2 w-64 -translate-x-1/2 rounded-md border border-hairline bg-surface p-2 shadow-xl">
+      <div className="flex items-baseline gap-1.5">
+        <span className="font-mono text-2xs text-accent">{commit.short_sha}</span>
+        {commit.release && <Tag tone="signal">{commit.release}</Tag>}
+        {commit.is_merge && <Tag>merge</Tag>}
+      </div>
+      <p className="mt-1 line-clamp-3 text-2xs leading-snug text-ink">{commit.summary}</p>
+      <div className="mt-1.5 flex items-center gap-2 text-[0.58rem] text-faint">
+        <span className="truncate">{commit.author}</span>
+        <span>·</span>
+        <span className="shrink-0">{formatDate(commit.authored_at)}</span>
+        {/* Merge commits legitimately report zero: their file lists are not
+            walked, because a merge diff restates the merged branch. */}
+        {!commit.is_merge && (
+          <>
+            <span>·</span>
+            <span className="shrink-0">{commit.files_changed} files</span>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ChangedFiles() {
+  const commit = useGraphStore((s) => s.commit)
+  const revealNode = useGraphStore((s) => s.revealNode)
+  const openFile = useGraphStore((s) => s.openFile)
+
+  if (!commit) return null
+
+  return (
+    <div className="border-t border-hairline px-3 py-1.5">
+      <div className="flex items-baseline gap-2">
+        <span className="font-mono text-2xs text-accent">{commit.commit.short_sha}</span>
+        <span className="truncate text-2xs text-ink">{commit.commit.summary}</span>
+        <span className="ml-auto shrink-0 text-[0.58rem] text-faint">
+          {commit.commit.author} · {commit.files_changed} files
+        </span>
+      </div>
+      <div className="mt-1 flex flex-wrap gap-1">
+        {commit.files.slice(0, 14).map((file) => (
+          <button
+            key={file.relative_path}
+            type="button"
+            disabled={!file.indexed}
+            onClick={() => {
+              void revealNode(file.node_id)
+              void openFile(file.node_id, file.relative_path.split('/').pop(), file.relative_path)
+            }}
+            title={
+              file.indexed
+                ? file.relative_path
+                : `${file.relative_path} — changed in this commit but not indexed`
+            }
+            className={cx(
+              'rounded border px-1.5 py-0.5 font-mono text-[0.58rem] transition-colors',
+              file.indexed
+                ? 'border-hairline text-muted hover:border-accent/50 hover:text-accent'
+                : 'cursor-default border-hairline/50 text-faint',
+            )}
+          >
+            <span className="mr-1 text-accent">{file.change_type}</span>
+            {file.relative_path.split('/').pop()}
+          </button>
+        ))}
+        {commit.files.length > 14 && (
+          <span className="self-center text-[0.58rem] text-faint">
+            +{commit.files.length - 14} more
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export function Timeline() {
-  const timeline = useGraphStore((s) => s.timeline)
-  const cursor = useGraphStore((s) => s.cursor)
-  const setCursor = useGraphStore((s) => s.setCursor)
+  const commits = useGraphStore((s) => s.commits)
+  const selected = useGraphStore((s) => s.commit)
+  const selectCommit = useGraphStore((s) => s.selectCommit)
   const loading = useGraphStore((s) => s.loading)
   const snapshot = useGraphStore((s) => s.snapshot)
-  const [hover, setHover] = useState<number | null>(null)
+  const [hover, setHover] = useState<string | null>(null)
+  const trackRef = useRef<HTMLDivElement>(null)
 
-  const span = timeline?.range
-  const start = span?.first_at ?? null
-  const end = span?.last_at ?? null
+  const dots = commits?.commits ?? []
 
-  const lanes = useMemo(() => (timeline?.lanes ?? []).slice(0, MAX_LANES), [timeline])
+  // The newest commit is the interesting end, and it is on the right.
+  useEffect(() => {
+    const track = trackRef.current
+    if (track) track.scrollLeft = track.scrollWidth
+  }, [dots.length])
 
-  const peak = useMemo(() => {
-    let max = 1
-    for (const lane of lanes) {
-      for (const period of lane.periods) max = Math.max(max, period.commits)
-    }
-    return max
-  }, [lanes])
+  const trunk = useMemo(() => dots.filter((c) => !c.is_merge), [dots])
 
-  if (!timeline || !start || !end || end <= start) {
+  if (!commits || dots.length === 0) {
     return (
       <div className="border-b border-hairline px-3 py-2 text-2xs text-faint">
         No git history was indexed for this repository, so the timeline is unavailable.
@@ -54,35 +140,22 @@ export function Timeline() {
     )
   }
 
-  const total = end - start
-  const ratio = (at: number) => Math.max(0, Math.min(1, (at - start) / total))
-
-  function pick(event: React.MouseEvent<HTMLDivElement>) {
-    const rect = event.currentTarget.getBoundingClientRect()
-    const fraction = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width))
-    void setCursor(Math.round(start! + fraction * total))
-  }
-
-  function track(event: React.MouseEvent<HTMLDivElement>) {
-    const rect = event.currentTarget.getBoundingClientRect()
-    const fraction = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width))
-    setHover(Math.round(start! + fraction * total))
-  }
+  const selectedSha = selected?.commit.sha ?? null
 
   return (
     <div className="shrink-0 border-b border-hairline bg-surface/50">
       <div className="flex items-center gap-2 px-3 pb-1 pt-2">
         <span className="text-2xs uppercase tracking-[0.14em] text-faint">Repository timeline</span>
-        <Tag>{timeline.range.total} commits</Tag>
-        {timeline.releases.length > 0 && <Tag>{timeline.releases.length} releases</Tag>}
-        {cursor !== null && (
+        <Tag>{commits.range.total} commits</Tag>
+        {commits.truncated && <Tag>showing latest {dots.length}</Tag>}
+        {selectedSha && (
           <Tag tone="accent">
-            viewing {formatDate(cursor)}
+            viewing {formatDate(selected?.commit.authored_at)}
             {snapshot ? ` · ${snapshot.files_present} files` : ''}
           </Tag>
         )}
-        {cursor !== null && (
-          <Button size="sm" className="ml-auto" onClick={() => void setCursor(null)}>
+        {selectedSha && (
+          <Button size="sm" className="ml-auto" onClick={() => void selectCommit(null)}>
             <IconRefresh width={12} height={12} />
             Back to now
           </Button>
@@ -90,87 +163,69 @@ export function Timeline() {
       </div>
 
       <div
-        className="relative cursor-crosshair select-none px-3 pb-2"
-        onClick={pick}
-        onMouseMove={track}
-        onMouseLeave={() => setHover(null)}
-        role="slider"
-        aria-label="Timeline cursor"
-        aria-valuemin={start}
-        aria-valuemax={end}
-        aria-valuenow={cursor ?? end}
-        tabIndex={0}
-        onKeyDown={(event) => {
-          const step = total / 40
-          if (event.key === 'ArrowRight') void setCursor(Math.min(end, (cursor ?? end) + step))
-          if (event.key === 'ArrowLeft') void setCursor(Math.max(start, (cursor ?? end) - step))
-        }}
+        ref={trackRef}
+        className="scrollbar-thin overflow-x-auto px-3 pb-2"
+        role="listbox"
+        aria-label="Commit history"
       >
-        <div className="relative" style={{ height: lanes.length * LANE_HEIGHT }}>
-          {lanes.map((lane, index) => (
-            <div
-              key={lane.module}
-              className="absolute inset-x-0 flex items-center gap-2"
-              style={{ top: index * LANE_HEIGHT, height: LANE_HEIGHT }}
-            >
-              <span className="w-24 shrink-0 truncate text-right font-mono text-2xs text-muted">
-                {lane.module}
-              </span>
-              <div className="relative h-3.5 flex-1 rounded bg-raised/60">
-                {lane.periods.map((period) => {
-                  const left = ratio(period.first_at) * 100
-                  const width = Math.max(
-                    0.7,
-                    (ratio(period.last_at) - ratio(period.first_at)) * 100,
-                  )
-                  const intensity = 0.25 + 0.75 * Math.min(1, period.commits / peak)
-                  return (
-                    <div
-                      key={period.period}
-                      className="absolute top-0 h-full rounded-sm bg-accent"
-                      style={{ left: `${left}%`, width: `${width}%`, opacity: intensity }}
-                      title={`${lane.module} · ${period.period} · ${period.commits} commits`}
-                    />
-                  )
-                })}
+        <div
+          className="relative"
+          style={{ height: 46, minWidth: dots.length * (DOT + 13) + 24 }}
+        >
+          {/* The trunk line, drawn behind the dots. */}
+          <div className="absolute left-0 right-0 top-[13px] h-px bg-hairline" />
+
+          {dots.map((commit, index) => {
+            const left = index * (DOT + 13) + 8
+            const top = commit.is_merge ? MERGE_LANE + 6 : 9
+            const active = commit.sha === selectedSha
+
+            return (
+              <div key={commit.sha} className="absolute" style={{ left, top: 0 }}>
+                {/* Merge dots hang off the trunk on their own lane. */}
+                {commit.is_merge && (
+                  <div
+                    className="absolute left-1/2 w-px bg-hairline"
+                    style={{ top: 13, height: MERGE_LANE - 4 }}
+                  />
+                )}
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={active}
+                  aria-label={`${commit.short_sha} ${commit.summary}`}
+                  onClick={() => void selectCommit(active ? null : commit.sha)}
+                  onMouseEnter={() => setHover(commit.sha)}
+                  onMouseLeave={() => setHover(null)}
+                  onFocus={() => setHover(commit.sha)}
+                  onBlur={() => setHover(null)}
+                  className={cx(
+                    'absolute rounded-full border transition-all',
+                    active
+                      ? 'scale-125 border-accent bg-accent'
+                      : commit.release
+                        ? 'border-signal bg-signal/70 hover:scale-110'
+                        : commit.is_merge
+                          ? 'border-hairline bg-surface hover:border-accent/60'
+                          : 'border-muted/60 bg-muted/50 hover:scale-110 hover:border-accent',
+                    loading && active && 'animate-pulse-dot',
+                  )}
+                  style={{ width: DOT, height: DOT, top, left: 0 }}
+                />
+                {hover === commit.sha && <CommitTooltip commit={commit} />}
               </div>
-            </div>
-          ))}
-
-          {/* Release markers, drawn across every lane. */}
-          {timeline.releases.map((release) => (
-            <div
-              key={release.name}
-              className="pointer-events-none absolute top-0 w-px bg-signal/50"
-              style={{ left: `calc(6rem + 0.5rem + ${ratio(release.created_at) * 100}%)`, height: '100%' }}
-              title={`${release.name} · ${formatDate(release.created_at)}`}
-            />
-          ))}
-
-          {hover !== null && (
-            <div
-              className="pointer-events-none absolute top-0 h-full w-px bg-faint"
-              style={{ left: `calc(6rem + 0.5rem + ${ratio(hover) * 100}%)` }}
-            />
-          )}
-
-          {cursor !== null && (
-            <div
-              className={cx(
-                'pointer-events-none absolute top-0 h-full w-0.5 bg-accent',
-                loading && 'animate-pulse-dot',
-              )}
-              style={{ left: `calc(6rem + 0.5rem + ${ratio(cursor) * 100}%)` }}
-            />
-          )}
+            )
+          })}
         </div>
 
-        <div className="mt-1 flex justify-between pl-[6.5rem] font-mono text-[0.58rem] text-faint">
-          <span>{formatDate(start)}</span>
-          <span>{hover !== null ? formatDate(hover) : ''}</span>
-          <span>{formatDate(end)}</span>
+        <div className="flex justify-between font-mono text-[0.58rem] text-faint">
+          <span>{formatDate(dots[0]?.authored_at)}</span>
+          <span>{trunk.length} commits with file changes</span>
+          <span>{formatDate(dots[dots.length - 1]?.authored_at)}</span>
         </div>
       </div>
+
+      <ChangedFiles />
     </div>
   )
 }

@@ -64,19 +64,38 @@ function Canvas() {
   const edges = useGraphStore((s) => s.edges)
   const selected = useGraphStore((s) => s.selected)
   const highlight = useGraphStore((s) => s.highlight)
+  const flow = useGraphStore((s) => s.flow)
   const drillInto = useGraphStore((s) => s.drillInto)
   const selectNode = useGraphStore((s) => s.selectNode)
 
   const { fitView } = useReactFlow()
 
+  /**
+   * Node id -> which *step* of the flow it belongs to, 1-based.
+   *
+   * Deliberately the step depth, not the position in the flat id list. A flow
+   * is layered, not linear: `main.py` imports both `database.py` and
+   * `routes/auth.py`, so those two are the same step. Numbering them 2 and 3
+   * would assert an ordering between them that the import graph does not
+   * contain.
+   */
+  const flowOrder = useMemo(() => {
+    const order = new Map<string, number>()
+    flow?.steps.forEach((step) =>
+      step.nodes.forEach((node) => order.set(node.id, step.depth + 1)),
+    )
+    return order
+  }, [flow])
+
   const flowNodes: Node<FlowNodeData>[] = useMemo(() => {
     const positioned = layout(focus, nodes)
-    const highlighting = highlight.origin !== null
+    const highlighting = highlight.origin !== null || flowOrder.size > 0
 
     return positioned.map(({ model, x, y }) => {
       const isOrigin = model.id === highlight.origin
       const isDependency = highlight.dependencies.has(model.id)
       const isDependent = highlight.dependents.has(model.id)
+      const flowStep = flowOrder.get(model.id)
 
       return {
         id: model.id,
@@ -92,14 +111,18 @@ function Canvas() {
               ? 'dependency'
               : isDependent
                 ? 'dependent'
-                : 'none',
+                : flowStep != null
+                  ? 'flow'
+                  : 'none',
+          flowStep,
           // Dimming is what makes a highlight readable: without it every
           // node still competes for attention.
-          dimmed: highlighting && !isOrigin && !isDependency && !isDependent,
+          dimmed:
+            highlighting && !isOrigin && !isDependency && !isDependent && flowStep == null,
         },
       }
     })
-  }, [focus, nodes, selected, highlight])
+  }, [focus, nodes, selected, highlight, flowOrder])
 
   const flowEdges: Edge[] = useMemo(() => {
     const onScreen = new Set(flowNodes.map((n) => n.id))

@@ -19,6 +19,7 @@ from app.agent.intents import (
     INTENT_DEPENDENCY,
     INTENT_FILE,
     INTENT_HISTORY,
+    INTENT_READONLY,
     INTENT_SEARCH,
     INTENT_STRUCTURE,
     classify,
@@ -215,11 +216,31 @@ def test_history_uses_git_data(agent: RepositoryAgent):
     assert "commits" in result["context"].lower()
 
 
-def test_code_generation_includes_the_real_implementation(agent: RepositoryAgent):
+def test_change_requests_are_declined_not_fulfilled(agent: RepositoryAgent):
+    # Phase 4, Part 16: Repoint is read-only. Phase 3 answered this intent by
+    # gathering the target's source and asking the model for new code; that is
+    # deliberately gone. The turn still runs — it gathers the same evidence —
+    # but the instruction is to explain the change, never to write it.
     result = ask(agent, "Create tests for service.py")
-    assert result["intent"] == INTENT_CODE_GENERATION
-    assert "Current implementation" in result["context"]
+    assert result["intent"] == INTENT_READONLY
+
+    facts = "\n".join(result["facts"])
+    assert "read-only" in facts
+    assert "Do not produce a patch" in facts
+
+
+def test_a_declined_request_still_gets_real_evidence(agent: RepositoryAgent):
+    # Declining is not the same as being unhelpful: the answer should be able
+    # to name what the change would touch, so retrieval and the graph still run.
+    result = ask(agent, "Refactor service.py to use a repository pattern")
+    assert result["sources"]
     assert "class AuthService" in result["context"]
+
+
+def test_a_declined_request_offers_no_exploration_target(agent: RepositoryAgent):
+    # Part 5: an [Explore this] button under a refusal points nowhere useful.
+    result = ask(agent, "Rewrite service.py")
+    assert result["navigation"]["available"] is False
 
 
 def test_search_intent_retrieves(agent: RepositoryAgent):
