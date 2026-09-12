@@ -80,11 +80,6 @@
   .scrollbar-thin::-webkit-scrollbar-track {
     background: transparent;
   }
-
-  /* Section label used across all three columns. */
-  .rail-label {
-    @apply px-3 text-2xs font-semibold uppercase tracking-[0.14em] text-faint;
-  }
 }
 
 /* Markdown answer body. Kept hand-rolled instead of @tailwindcss/typography

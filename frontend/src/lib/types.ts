@@ -1,104 +1,112 @@
 /** Shared contracts between the UI and the FastAPI backend. */
 
-/** One retrieved chunk.
- *
- *  `file` is the primary path key and is always present. The rest became
- *  available once Phase 2 persisted AST metadata and Phase 3 split the
- *  retrieval score into its channels, so they stay optional for the demo
- *  fixtures and for any older backend.
- */
+export type NodeKind = 'file' | 'class' | 'function' | 'method'
+
+export type EdgeKind = 'CONTAINS' | 'IMPORTS' | 'DEPENDS_ON' | 'CALLS' | 'INHERITS' | 'IMPLEMENTS'
+
+export interface GraphNode {
+  id: string
+  kind: NodeKind
+  name: string
+  /** Path for files; `path::Qualified.name` for symbols. */
+  key: string
+  parent_id: string | null
+  data: {
+    language?: string
+    line_count?: number
+    /** Symbols only. */
+    relative_path?: string
+    start_line?: number
+    end_line?: number
+  }
+}
+
+export interface GraphEdge {
+  kind: EdgeKind
+  source: string
+  target: string
+}
+
+/** `GET /graph/{repository}/knowledge` */
+export interface KnowledgeGraph {
+  repository: string
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+  counts: Record<string, number>
+  /** Files and symbols in the repository, before the node cap. */
+  total_nodes: number
+  truncated: boolean
+}
+
+export type ImportState = 'cloning' | 'building_graph' | 'indexing_code' | 'ready' | 'error'
+
+export interface RepositoryStatus {
+  repository: string
+  url: string
+  state: ImportState
+  message: string
+  /** The knowledge graph exists and can be drawn and asked about. */
+  graph_ready: boolean
+  /** Code is embedded, so answers can quote source. */
+  search_ready: boolean
+  progress_done: number
+  progress_total: number
+  started_at: number
+  finished_at: number | null
+}
+
+export interface RepositoryEntry {
+  repository: string
+  counts: Record<string, number>
+  status: RepositoryStatus
+}
+
+/** One retrieved code chunk an answer was grounded in. */
 export interface Source {
   file: string
-  distance: number
-  content?: string
-  language?: string
-  chunk_index?: number
-  repository?: string
-  /** Same value as `file`; returned alongside it for symmetry with the graph. */
   relative_path?: string
   file_name?: string
-  /** Qualified symbol, e.g. `APIRouter.include_router`. */
+  repository?: string
   symbol?: string
-  chunk_type?: string
   start_line?: number
   end_line?: number
-  /** Reranked score actually used for ordering. */
-  score?: number
-  /** The two fused channels, for explaining why a chunk ranked where it did. */
-  vector_score?: number
-  keyword_score?: number
 }
 
-export interface ChatResponse {
-  question: string
-  answer: string
-  sources: Source[]
-  /** Optional per-stage timings, in ms, once the backend reports them. */
-  timings?: Partial<Record<PipelineStage, number>>
+/** The graph nodes an answer drew on, most central first. */
+export interface AnswerHighlight {
+  node_ids: string[]
+  focus_node_id: string | null
 }
 
-export type PipelineStage = 'embed' | 'search' | 'generate'
-
-export interface ImportResponse {
-  status: 'success' | 'error'
-  message: string
+/** What the user has selected in the graph, sent with every question. */
+export interface SelectionContext {
   repository?: string
-  path?: string
+  file?: string
+  symbol?: string
+  node_id?: string
 }
 
-export interface IndexStats {
-  files: number
-  chunks: number
-  stored_vectors: number
-}
-
-export type IndexState = 'unindexed' | 'cloning' | 'indexing' | 'ready' | 'error'
-
-export interface Repository {
-  id: string
-  name: string
-  url?: string
-  path?: string
-  state: IndexState
-  stats?: IndexStats
-  /** Percentage of source files per language, for the composition bar. */
-  languages?: Record<string, number>
-  error?: string
-  importedAt: number
+export interface AgentResponse {
+  repository: string
+  intent: string
+  confidence: number
+  answer: string
+  focus: { node_id: string | null; label: string | null }
+  highlight: AnswerHighlight
+  sources: Source[]
+  context_stats: Record<string, number>
 }
 
 export interface Message {
   id: string
   role: 'user' | 'assistant'
   content: string
-  sources?: Source[]
-  timings?: Partial<Record<PipelineStage, number>>
-  /** Wall-clock round trip measured in the browser. */
-  latencyMs?: number
-  error?: string
   pending?: boolean
-  repositoryId?: string
-  createdAt: number
-
-  /** Router intent and its confidence, once the agent answers. */
+  error?: string
   intent?: string
-  confidence?: number
-  /** What the turn resolved "it"/"this" to. */
   focusLabel?: string | null
-  /** Structured exploration target — drives the optional [Explore this]. */
-  navigation?: import('./graphTypes').NavigationTarget | null
-  /** Graph action to apply when the user is already in Explorer. */
-  uiAction?: import('./graphTypes').UiAction | null
-  /** How much evidence of each kind reached the prompt. */
-  contextStats?: Record<string, number>
+  highlight?: AnswerHighlight
+  sources?: Source[]
 }
 
-export interface RunSettings {
-  topK: number
-  model: string
-  embedModel: string
-  /** Hide chunks whose relevance falls under this bar, in the Inspector only. */
-  minRelevance: number
-}
-
-export type ConnectionState = 'checking' | 'online' | 'offline' | 'demo'
+export type ConnectionState = 'checking' | 'online' | 'offline'

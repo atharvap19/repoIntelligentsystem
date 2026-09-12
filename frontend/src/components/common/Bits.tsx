@@ -1,7 +1,5 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import { cx } from '@/lib/format'
-import { IconCheck, IconCopy } from './Icons'
-import { Button } from './Button'
 
 /** Small uppercase metadata pill. */
 export function Tag({
@@ -65,64 +63,5 @@ export function Thinking() {
         />
       ))}
     </span>
-  )
-}
-
-export function CopyButton({ value, label = 'Copy' }: { value: string; label?: string }) {
-  const [copied, setCopied] = useState(false)
-
-  useEffect(() => {
-    if (!copied) return
-    const t = setTimeout(() => setCopied(false), 1400)
-    return () => clearTimeout(t)
-  }, [copied])
-
-  return (
-    <Button
-      size="icon"
-      title={copied ? 'Copied' : label}
-      aria-label={copied ? 'Copied' : label}
-      onClick={async () => {
-        try {
-          await navigator.clipboard.writeText(value)
-          setCopied(true)
-        } catch {
-          /* clipboard blocked — nothing useful to say */
-        }
-      }}
-    >
-      {copied ? <IconCheck className="text-signal" /> : <IconCopy />}
-    </Button>
-  )
-}
-
-/** Horizontal relevance meter used by every chunk card. */
-export function ScoreBar({ value, className }: { value: number; className?: string }) {
-  const pct = Math.max(0, Math.min(1, value)) * 100
-  return (
-    <div className={cx('h-1 overflow-hidden rounded-full bg-hairline', className)}>
-      <div
-        className="h-full rounded-full bg-gradient-to-r from-signal to-accent transition-[width] duration-500"
-        style={{ width: `${pct}%` }}
-      />
-    </div>
-  )
-}
-
-export function EmptyHint({
-  icon,
-  title,
-  children,
-}: {
-  icon: ReactNode
-  title: string
-  children?: ReactNode
-}) {
-  return (
-    <div className="flex flex-col items-center gap-2 px-6 py-10 text-center">
-      <div className="text-faint">{icon}</div>
-      <p className="text-sm font-medium text-muted">{title}</p>
-      {children && <p className="max-w-[34ch] text-xs leading-relaxed text-faint">{children}</p>}
-    </div>
   )
 }

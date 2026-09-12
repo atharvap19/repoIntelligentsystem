@@ -12,7 +12,6 @@ import pytest
 
 from app.graph.store import GraphStore
 from app.rag.vector_store import VectorStore
-from app.services.chat_service import ChatService, UnknownRepositoryError
 from app.services.indexing_service import IndexingService
 
 from .conftest import write
@@ -201,60 +200,6 @@ def test_reindex_finds_the_checkout_under_the_repositories_root(
 def test_reindex_without_a_checkout_raises(service: IndexingService):
     with pytest.raises(FileNotFoundError):
         service.reindex_repository("missing")
-
-
-# ------------------------------------------------- repository resolution (chat)
-
-
-class _StubRetriever:
-    def __init__(self, store):
-        self.vector_store = store
-
-
-def chat_service_for(store: VectorStore) -> ChatService:
-    return ChatService(
-        embedding_service=FakeEmbeddingService(),
-        retriever=_StubRetriever(store),
-        llm_service=object(),
-    )
-
-
-def test_single_repository_is_resolved_implicitly(service: IndexingService, checkout: Path):
-    service.index_repository(checkout)
-    chat = chat_service_for(service.vector_store)
-    assert chat.resolve_repository(None) == "demo_repo"
-
-
-def test_explicit_repository_is_honoured(service: IndexingService, checkout: Path):
-    service.index_repository(checkout)
-    chat = chat_service_for(service.vector_store)
-    assert chat.resolve_repository("demo_repo") == "demo_repo"
-
-
-def test_unknown_repository_is_rejected_with_available_names(
-    service: IndexingService, checkout: Path
-):
-    service.index_repository(checkout)
-    chat = chat_service_for(service.vector_store)
-    with pytest.raises(UnknownRepositoryError, match="demo_repo"):
-        chat.resolve_repository("nope")
-
-
-def test_ambiguous_repository_is_rejected(service: IndexingService, checkout: Path, tmp_path: Path):
-    other = tmp_path / "other_repo"
-    write(other, "a.py", "def other():\n    return 'body text here for size'\n")
-    service.index_repository(checkout)
-    service.index_repository(other)
-
-    chat = chat_service_for(service.vector_store)
-    with pytest.raises(UnknownRepositoryError, match="required"):
-        chat.resolve_repository(None)
-
-
-def test_no_repositories_gives_an_actionable_error(tmp_path: Path):
-    store = VectorStore(persist_directory=str(tmp_path / "chroma"))
-    with pytest.raises(UnknownRepositoryError, match="No repositories"):
-        chat_service_for(store).resolve_repository(None)
 
 
 # ------------------------------------------------------ item 8: incremental

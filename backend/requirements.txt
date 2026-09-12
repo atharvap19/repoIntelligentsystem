@@ -9,3 +9,4 @@ python-dotenv
 # See docs/langchain.md for the per-component evaluation.
 langchain-core
 langchain-ollama
+langgraph

@@ -1,627 +1,203 @@
 import { create } from 'zustand'
-import * as api from '@/lib/graphApi'
+import * as api from '@/lib/api'
 import type {
-  CommitDetail,
-  CommitTimeline,
-  DependencyResult,
-  ExplorerContextPayload,
-  FileContent,
+  AnswerHighlight,
   GraphEdge,
   GraphNode,
-  NavigationTarget,
-  NodeDetail,
-  RepositoryFlow,
-  Snapshot,
-  Timeline,
-  UiAction,
-} from '@/lib/graphTypes'
+  NodeKind,
+  SelectionContext,
+} from '@/lib/types'
 
-/** One open code cell below the graph. */
-export interface OpenFile {
-  nodeId: string
-  name: string
-  path: string
-  content: FileContent | null
-  loading: boolean
-  error: string | null
-  collapsed: boolean
-}
+const KNOWLEDGE_KINDS = new Set<NodeKind>(['file', 'class', 'function', 'method'])
 
-interface GraphState {
-  repository: string | null
-  available: { repository: string; counts: Record<string, number> }[]
-
-  /** Ancestors of the current view, root first — drives the breadcrumb. */
-  path: GraphNode[]
-  /** The node whose children are on screen. */
-  focus: GraphNode | null
-  nodes: GraphNode[]
-  edges: GraphEdge[]
-  truncated: boolean
-  totalChildren: number
-
-  selected: GraphNode | null
-  detail: NodeDetail | null
-  dependencies: DependencyResult | null
-
-  /** Node IDs to emphasise, and the ones to dim, for dependency highlighting. */
-  highlight: { dependencies: Set<string>; dependents: Set<string>; origin: string | null }
-  /** An ordered chain from a flow answer, drawn as a path through the graph. */
-  flow: RepositoryFlow | null
-
-  openFiles: OpenFile[]
-
-  timeline: Timeline | null
-  /** Commit dots (Part 11). Separate from `timeline`, which is module activity. */
-  commits: CommitTimeline | null
-  /** The commit being viewed, or null for the live repository. */
-  commit: CommitDetail | null
-  /** Unix seconds. `null` means "now" — the live graph, not a snapshot. */
-  cursor: number | null
-  snapshot: Snapshot | null
-
-  loading: boolean
-  error: string | null
-  counts: Record<string, number>
-
-  bootstrap: () => Promise<void>
-  selectRepository: (repository: string) => Promise<void>
-  drillInto: (node: GraphNode) => Promise<void>
-  navigateTo: (index: number) => Promise<void>
-  goUp: () => Promise<void>
-  selectNode: (node: GraphNode | null) => Promise<void>
-  showDependencies: (nodeId: string) => Promise<void>
-  clearHighlight: () => void
-  openFile: (nodeId: string, name?: string, path?: string) => Promise<void>
-  closeFile: (nodeId: string) => void
-  toggleFileCollapsed: (nodeId: string) => void
-  setCursor: (timestamp: number | null) => Promise<void>
-  selectCommit: (sha: string | null) => Promise<void>
-  /** Render a derived flow as an ordered chain across hierarchy levels. */
-  showFlow: (startNodeId?: string) => Promise<void>
-  applyAgentAction: (action: UiAction | null) => Promise<void>
-  applyNavigation: (target: NavigationTarget) => Promise<void>
-  revealNode: (nodeId: string) => Promise<void>
-  focusById: (nodeId: string) => Promise<void>
-  /** What the user currently has open, for the agent's context (Part 3). */
-  explorerContext: () => ExplorerContextPayload
-}
-
-const EMPTY_HIGHLIGHT = {
-  dependencies: new Set<string>(),
-  dependents: new Set<string>(),
-  origin: null as string | null,
-}
+/** The backend caps a node-set request at this many ids. */
+const NODE_SET_LIMIT = 60
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err))
 
-export const useGraphStore = create<GraphState>((set, get) => ({
-  repository: null,
-  available: [],
-  path: [],
-  focus: null,
-  nodes: [],
-  edges: [],
-  truncated: false,
-  totalChildren: 0,
-  selected: null,
-  detail: null,
-  dependencies: null,
-  highlight: EMPTY_HIGHLIGHT,
-  flow: null,
-  openFiles: [],
-  timeline: null,
-  commits: null,
-  commit: null,
-  cursor: null,
-  snapshot: null,
-  loading: false,
-  error: null,
+interface GraphState {
+  repository: string | null
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+  counts: Record<string, number>
+  totalNodes: number
+  truncated: boolean
+  /**
+   * Bumped when a different graph is loaded, not when nodes are merged in.
+   * Community colours key off it, so an answer that adds nodes does not
+   * repaint the whole graph.
+   */
+  version: number
+  loading: boolean
+  error: string | null
+
+  selectedId: string | null
+  /** Nodes the latest answer drew on. Shown whenever nothing is selected. */
+  highlight: AnswerHighlight | null
+  /** Bumped to ask the canvas to re-frame onto whatever is emphasised. */
+  frameRequest: number
+
+  load: (repository: string) => Promise<void>
+  reset: () => void
+  select: (nodeId: string | null, frame?: boolean) => void
+  /** Select a node that may not be loaded yet, then frame it. */
+  focusNode: (nodeId: string) => Promise<void>
+  /** Light up an answer's nodes, loading any the capped graph left out. */
+  showAnswer: (highlight: AnswerHighlight) => Promise<void>
+  clearEmphasis: () => void
+  selectionContext: () => SelectionContext
+}
+
+const EMPTY = {
+  nodes: [] as GraphNode[],
+  edges: [] as GraphEdge[],
   counts: {},
+  totalNodes: 0,
+  truncated: false,
+  selectedId: null,
+  highlight: null,
+  error: null,
+}
 
+export const useGraphStore = create<GraphState>((set, get) => {
   /**
-   * Describe the current selection for the agent.
+   * Add nodes the knowledge graph withheld, so an answer about them has
+   * something to light up.
    *
-   * This is the whole of Part 3 on the client side: the question travels with
-   * what the user is looking at, so "explain this" needs no antecedent in the
-   * text. Both the Chat view and the Explorer sidebar read it — in Chat it is
-   * usually near-empty, which is correct.
+   * Containers come along too — a method arrives with its class and file —
+   * because a symbol floating free of its source file says nothing about
+   * where it lives. Up to three rounds covers method → class → file.
    */
-  explorerContext() {
-    const { repository, selected, path, openFiles, highlight, commit } = get()
+  async function merge(ids: string[]) {
+    let wanted = ids
+    for (let round = 0; round < 3; round++) {
+      const known = new Set(get().nodes.map((n) => n.id))
+      const missing = [...new Set(wanted)].filter((id) => !known.has(id)).slice(0, NODE_SET_LIMIT)
+      if (!missing.length) return
 
-    const file =
-      selected?.kind === 'file'
-        ? selected.key
-        : (selected?.data.relative_path ?? openFiles[0]?.path ?? '')
-    const symbol =
-      selected && selected.kind !== 'file' && selected.kind !== 'module'
-        ? selected.name
-        : ''
+      const { nodes, edges } = await api.fetchNodeSet(missing)
+      const added = nodes.filter((n) => KNOWLEDGE_KINDS.has(n.kind) && !known.has(n.id))
+      if (!added.length) return
 
-    return {
-      repository: repository ?? '',
-      // The breadcrumb's module level, which is where the user actually is
-      // even when nothing is selected.
-      module: selected?.data.module ?? path[1]?.name ?? '',
-      file,
-      symbol,
-      node_id: selected?.id ?? '',
-      focus_node_ids: highlight.origin ? [highlight.origin] : [],
-      commit_sha: commit?.commit.sha ?? '',
-      timestamp: get().cursor,
-    }
-  },
+      const present = new Set([...known, ...added.map((n) => n.id)])
+      const contains: GraphEdge[] = [...get().nodes, ...added]
+        .filter((n) => n.kind !== 'file' && n.parent_id && present.has(n.parent_id))
+        .filter((n) => added.some((a) => a.id === n.id || a.id === n.parent_id))
+        .map((n) => ({ kind: 'CONTAINS', source: n.parent_id!, target: n.id }))
 
-  async bootstrap() {
-    set({ loading: true, error: null })
-    try {
-      const { repositories } = await api.listGraphRepositories()
-      set({ available: repositories, loading: false })
-      const first = repositories[0]?.repository
-      if (first && !get().repository) await get().selectRepository(first)
-    } catch (err) {
-      set({ loading: false, error: message(err) })
-    }
-  },
-
-  async selectRepository(repository) {
-    if (get().repository === repository && get().focus) return
-
-    set({
-      repository,
-      loading: true,
-      error: null,
-      path: [],
-      nodes: [],
-      edges: [],
-      selected: null,
-      detail: null,
-      dependencies: null,
-      highlight: EMPTY_HIGHLIGHT,
-      flow: null,
-      openFiles: [],
-      cursor: null,
-      snapshot: null,
-      commit: null,
-    })
-    try {
-      const [overview, timeline, commits] = await Promise.all([
-        api.fetchOverview(repository),
-        // A repository with no git history still has a graph; both history
-        // views are optional decoration, so their failure must not blank the
-        // structure.
-        api.fetchTimeline(repository).catch(() => null),
-        api.fetchCommits(repository).catch(() => null),
-      ])
-      set({
-        focus: overview.root,
-        path: [overview.root],
-        nodes: overview.nodes,
-        edges: overview.edges,
-        counts: overview.counts,
-        timeline,
-        commits,
-        truncated: false,
-        totalChildren: overview.nodes.length,
-        loading: false,
-      })
-    } catch (err) {
-      set({ loading: false, error: message(err) })
-    }
-  },
-
-  async drillInto(node) {
-    // Files and symbols open rather than expand; only containers drill down.
-    if (node.kind === 'file') {
-      await get().openFile(node.id, node.name, node.key)
-      await get().selectNode(node)
-      return
-    }
-    if (node.kind === 'external') {
-      await get().selectNode(node)
-      return
-    }
-
-    set({ loading: true, error: null })
-    try {
-      const expansion = await api.expandNode(node.id)
       set((s) => ({
-        focus: expansion.node,
-        path: [...s.path, expansion.node],
-        nodes: expansion.nodes,
-        edges: expansion.edges,
-        truncated: expansion.truncated,
-        totalChildren: expansion.total_children,
-        highlight: EMPTY_HIGHLIGHT,
-        loading: false,
+        nodes: [...s.nodes, ...added],
+        edges: [
+          ...s.edges,
+          ...contains,
+          ...edges
+            .filter((e) => present.has(e.source) && present.has(e.target))
+            .map((e) => ({ kind: e.kind, source: e.source, target: e.target })),
+        ],
       }))
-    } catch (err) {
-      set({ loading: false, error: message(err) })
+
+      wanted = added
+        .filter((n) => n.kind !== 'file' && n.parent_id && !present.has(n.parent_id))
+        .map((n) => n.parent_id!)
     }
-  },
+  }
 
-  async navigateTo(index) {
-    const { path, repository } = get()
-    const target = path[index]
-    if (!target || !repository) return
+  return {
+    repository: null,
+    ...EMPTY,
+    version: 0,
+    loading: false,
+    frameRequest: 0,
 
-    if (index === 0) {
-      set({ repository: null })
-      await get().selectRepository(repository)
-      return
-    }
-    set({ loading: true, error: null })
-    try {
-      const expansion = await api.expandNode(target.id)
-      set({
-        focus: expansion.node,
-        path: path.slice(0, index + 1),
-        nodes: expansion.nodes,
-        edges: expansion.edges,
-        truncated: expansion.truncated,
-        totalChildren: expansion.total_children,
-        highlight: EMPTY_HIGHLIGHT,
-        loading: false,
-      })
-    } catch (err) {
-      set({ loading: false, error: message(err) })
-    }
-  },
-
-  async goUp() {
-    const { path } = get()
-    if (path.length > 1) await get().navigateTo(path.length - 2)
-  },
-
-  async selectNode(node) {
-    set({ selected: node, detail: null, dependencies: null })
-    if (!node) return
-    try {
-      const detail = await api.fetchNodeDetail(node.id)
-      // Discard if the user moved on while this was in flight.
-      if (get().selected?.id === node.id) set({ detail })
-    } catch (err) {
-      set({ error: message(err) })
-    }
-  },
-
-  async showDependencies(nodeId) {
-    try {
-      const result = await api.fetchDependencies(nodeId)
-      set({
-        dependencies: result,
-        highlight: {
-          dependencies: new Set(result.dependencies.map((n) => n.id)),
-          dependents: new Set(result.dependents.map((n) => n.id)),
-          origin: nodeId,
-        },
-      })
-    } catch (err) {
-      set({ error: message(err) })
-    }
-  },
-
-  clearHighlight() {
-    set({ highlight: EMPTY_HIGHLIGHT, flow: null })
-  },
-
-  async openFile(nodeId, name, path) {
-    const existing = get().openFiles.find((f) => f.nodeId === nodeId)
-    if (existing) {
-      // Already open: surface it rather than fetching twice.
-      set((s) => ({
-        openFiles: s.openFiles.map((f) =>
-          f.nodeId === nodeId ? { ...f, collapsed: false } : f,
-        ),
-      }))
-      return
-    }
-
-    set((s) => ({
-      openFiles: [
-        ...s.openFiles,
-        {
-          nodeId,
-          name: name ?? nodeId.split('::').pop() ?? nodeId,
-          path: path ?? '',
-          content: null,
-          loading: true,
-          error: null,
-          collapsed: false,
-        },
-      ],
-    }))
-
-    try {
-      const content = await api.fetchFileContent(nodeId)
-      set((s) => ({
-        openFiles: s.openFiles.map((f) =>
-          f.nodeId === nodeId
-            ? {
-                ...f,
-                content,
-                loading: false,
-                name: content.node.name,
-                path: content.relative_path,
-              }
-            : f,
-        ),
-      }))
-    } catch (err) {
-      set((s) => ({
-        openFiles: s.openFiles.map((f) =>
-          f.nodeId === nodeId ? { ...f, loading: false, error: message(err) } : f,
-        ),
-      }))
-    }
-  },
-
-  closeFile(nodeId) {
-    set((s) => ({ openFiles: s.openFiles.filter((f) => f.nodeId !== nodeId) }))
-  },
-
-  toggleFileCollapsed(nodeId) {
-    set((s) => ({
-      openFiles: s.openFiles.map((f) =>
-        f.nodeId === nodeId ? { ...f, collapsed: !f.collapsed } : f,
-      ),
-    }))
-  },
-
-  async setCursor(timestamp) {
-    const { repository } = get()
-    if (!repository) return
-
-    if (timestamp === null) {
-      set({ cursor: null, snapshot: null, commit: null, repository: null })
-      await get().selectRepository(repository)
-      return
-    }
-
-    set({ cursor: timestamp, loading: true })
-    try {
-      const snapshot = await api.fetchSnapshot(repository, timestamp)
-      // Time travel replaces the top level only; drilling into history would
-      // need per-commit trees, which the backend deliberately does not build.
-      set({
-        snapshot,
-        focus: snapshot.root,
-        path: snapshot.root ? [snapshot.root] : [],
-        nodes: snapshot.nodes,
-        edges: snapshot.edges,
-        truncated: false,
-        totalChildren: snapshot.nodes.length,
-        loading: false,
-      })
-    } catch (err) {
-      set({ loading: false, error: message(err) })
-    }
-  },
-
-  /**
-   * Move the repository to the state at a commit (Part 11).
-   *
-   * The commit detail and the snapshot are fetched together: the detail names
-   * what changed and the snapshot is what the graph shows, and displaying one
-   * without the other leaves the header describing a view that is not on
-   * screen yet.
-   */
-  async selectCommit(sha) {
-    const { repository } = get()
-    if (!repository) return
-
-    if (sha === null) {
-      set({ commit: null, cursor: null, snapshot: null, repository: null })
-      await get().selectRepository(repository)
-      return
-    }
-
-    set({ loading: true, error: null })
-    try {
-      const [detail, snapshot] = await Promise.all([
-        api.fetchCommit(repository, sha),
-        api.fetchCommitSnapshot(repository, sha),
-      ])
-      set({
-        commit: detail,
-        cursor: detail.commit.authored_at,
-        snapshot,
-        focus: snapshot.root,
-        path: snapshot.root ? [snapshot.root] : [],
-        nodes: snapshot.nodes,
-        edges: snapshot.edges,
-        truncated: false,
-        totalChildren: snapshot.nodes.length,
-        highlight: EMPTY_HIGHLIGHT,
-        loading: false,
-      })
-    } catch (err) {
-      set({ loading: false, error: message(err) })
-    }
-  },
-
-  async applyAgentAction(action) {
-    if (!action) return
-    if (action.type === 'open_file') {
-      await get().openFile(action.node_id)
-      await get().focusById(action.node_id)
-      return
-    }
-    if (action.type === 'highlight_dependencies') {
-      await get().focusById(action.node_id)
-      await get().showDependencies(action.node_id)
-      return
-    }
-    if (action.type === 'show_flow') {
-      await get().showFlow(action.node_ids[0])
-      return
-    }
-    if (action.type === 'show_structure') {
-      const { repository } = get()
-      if (repository) {
-        set({ repository: null })
-        await get().selectRepository(repository)
+    async load(repository) {
+      set({ repository, ...EMPTY, loading: true })
+      try {
+        const graph = await api.fetchKnowledgeGraph(repository)
+        // Discard if the user switched repositories while this was in flight.
+        if (get().repository !== repository) return
+        set((s) => ({
+          nodes: graph.nodes,
+          edges: graph.edges,
+          counts: graph.counts,
+          totalNodes: graph.total_nodes,
+          truncated: graph.truncated,
+          version: s.version + 1,
+          loading: false,
+        }))
+      } catch (err) {
+        if (get().repository === repository) set({ loading: false, error: message(err) })
       }
-    }
-  },
+    },
 
-  /**
-   * Act on a structured navigation target — what [Explore this] does.
-   *
-   * Switching to the Explorer view is the caller's job, not this store's: the
-   * view flag lives in the app store, and reaching across for it here would
-   * make the two stores mutually dependent.
-   */
-  async applyNavigation(target) {
-    if (!target.available) return
-    const { repository } = get()
+    reset() {
+      set((s) => ({ repository: null, ...EMPTY, loading: false, version: s.version + 1 }))
+    },
 
-    if (target.repository && target.repository !== repository) {
-      await get().selectRepository(target.repository)
-    }
+    select(nodeId, frame = false) {
+      set((s) => ({
+        selectedId: nodeId,
+        frameRequest: frame ? s.frameRequest + 1 : s.frameRequest,
+      }))
+    },
 
-    if (target.focus_mode === 'flow') {
-      await get().showFlow(target.node_id)
-      return
-    }
-
-    if (target.focus_mode === 'timeline') {
-      if (target.commit_sha) await get().selectCommit(target.commit_sha)
-      // Otherwise the timeline is already on screen; the file below is what
-      // gives it something to be about.
-      if (target.node_id) await get().revealNode(target.node_id)
-      return
-    }
-
-    if (target.target_type === 'architecture' || target.target_type === 'repository') {
-      const name = target.repository || repository
-      if (name) {
-        set({ repository: null })
-        await get().selectRepository(name)
+    async focusNode(nodeId) {
+      try {
+        await merge([nodeId])
+      } catch (err) {
+        set({ error: message(err) })
       }
-      return
-    }
+      if (get().nodes.some((n) => n.id === nodeId)) get().select(nodeId, true)
+    },
 
-    if (!target.node_id) return
-
-    await get().revealNode(target.node_id)
-
-    if (target.focus_mode === 'neighborhood') {
-      await get().showDependencies(target.node_id)
-    }
-    if (target.target_type === 'file' && target.file) {
-      await get().openFile(target.node_id, target.file.split('/').pop(), target.file)
-    }
-  },
-
-  /**
-   * Draw a derived flow as its own view.
-   *
-   * A flow cannot be shown by expanding a parent, which is how every other
-   * view here works. Its nodes deliberately cross levels — for a FastAPI-style
-   * layout the chain runs `backend/main.py -> backend/routes/auth.py ->
-   * backend/services/auth_service.py`, three different parents — so expanding
-   * the common ancestor renders the first two files and silently drops the
-   * rest. The set is fetched by name instead.
-   *
-   * The flow is re-fetched rather than rebuilt from the navigation target
-   * because the target is flat, and the step *depths* are what the numbering
-   * has to be truthful about.
-   */
-  async showFlow(startNodeId) {
-    const { repository } = get()
-    if (!repository) return
-
-    set({ loading: true, error: null })
-    try {
-      const flow = await api.fetchFlow(repository, startNodeId || undefined)
-      if (!flow.node_ids.length) {
-        set({ loading: false })
+    async showAnswer(highlight) {
+      if (!highlight.node_ids.length) {
+        set({ highlight: null })
         return
       }
-
-      const [{ nodes, edges }, { path }] = await Promise.all([
-        api.fetchNodeSet(flow.node_ids),
-        // The breadcrumb still needs somewhere to be, and the layout needs a
-        // container card to hang the chain beneath.
-        api.fetchNodePath(flow.node_ids[0]),
-      ])
-
-      const container = path[path.length - 2] ?? path[0] ?? null
-      set({
-        flow,
-        focus: container,
-        path: container ? path.slice(0, path.length - 1) : [],
-        nodes,
-        edges,
-        truncated: false,
-        totalChildren: nodes.length,
-        highlight: EMPTY_HIGHLIGHT,
-        loading: false,
-      })
-    } catch (err) {
-      set({ loading: false, error: message(err) })
-    }
-  },
-
-  /**
-   * Bring a node on screen wherever it sits in the hierarchy.
-   *
-   * The Explorer renders one level at a time, so selecting a deep node is not
-   * enough — its parent has to be the level on screen and the breadcrumb has
-   * to match, or the user lands somewhere with no way back up. The ancestor
-   * chain comes from the backend in one call rather than by walking parents.
-   */
-  async revealNode(nodeId) {
-    set({ loading: true, error: null })
-    try {
-      const { path } = await api.fetchNodePath(nodeId)
-      const target = path[path.length - 1]
-      if (!target) {
-        set({ loading: false })
-        return
+      try {
+        await merge(highlight.node_ids)
+      } catch {
+        // Highlighting what is already loaded is still worth doing.
       }
+      const loaded = new Set(get().nodes.map((n) => n.id))
+      const node_ids = highlight.node_ids.filter((id) => loaded.has(id))
+      set((s) => ({
+        highlight: node_ids.length
+          ? {
+              node_ids,
+              focus_node_id:
+                highlight.focus_node_id && loaded.has(highlight.focus_node_id)
+                  ? highlight.focus_node_id
+                  : node_ids[0],
+            }
+          : null,
+        // The answer is the newer statement of what matters; a selection
+        // would otherwise hide it.
+        selectedId: null,
+        frameRequest: s.frameRequest + 1,
+      }))
+    },
 
-      // Symbols are not laid out as their own level; show the file that holds
-      // them and select the symbol inside it.
-      const container = [...path]
-        .reverse()
-        .find((n) => n.kind !== 'file' && n.id !== target.id)
-      const parent = container ?? path[path.length - 2]
+    clearEmphasis() {
+      set((s) => ({ selectedId: null, highlight: null, frameRequest: s.frameRequest + 1 }))
+    },
 
-      if (parent) {
-        const expansion = await api.expandNode(parent.id)
-        const index = path.findIndex((n) => n.id === parent.id)
-        set({
-          focus: expansion.node,
-          path: path.slice(0, index + 1),
-          nodes: expansion.nodes,
-          edges: expansion.edges,
-          truncated: expansion.truncated,
-          totalChildren: expansion.total_children,
-        })
+    selectionContext() {
+      const { repository, selectedId, nodes } = get()
+      const node = selectedId ? nodes.find((n) => n.id === selectedId) : undefined
+      if (!node) return { repository: repository ?? '' }
+      return {
+        repository: repository ?? '',
+        file: node.kind === 'file' ? node.key : (node.data.relative_path ?? ''),
+        symbol: node.kind === 'file' ? '' : node.name,
+        node_id: node.id,
       }
+    },
+  }
+})
 
-      set({ loading: false })
-      await get().selectNode(target)
-    } catch (err) {
-      set({ loading: false, error: message(err) })
-    }
-  },
-
-  /** Select a node by id, loading its detail even if it is off screen. */
-  async focusById(nodeId) {
-    const known = get().nodes.find((n) => n.id === nodeId)
-    if (known) {
-      await get().selectNode(known)
-      return
-    }
-    try {
-      const detail = await api.fetchNodeDetail(nodeId)
-      set({ selected: detail.node, detail })
-    } catch (err) {
-      set({ error: message(err) })
-    }
-  },
-}))
+export function useSelectedNode(): GraphNode | null {
+  return useGraphStore((s) =>
+    s.selectedId ? (s.nodes.find((n) => n.id === s.selectedId) ?? null) : null,
+  )
+}

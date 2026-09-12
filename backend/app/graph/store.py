@@ -419,6 +419,30 @@ class GraphStore:
         ).fetchall()
         return [self._node(r) for r in rows]
 
+    def nodes_of_kinds(self, repository: str, kinds: Sequence[str]) -> list[dict]:
+        if not kinds:
+            return []
+        rows = self._connect().execute(
+            f"SELECT * FROM nodes WHERE repository = ? AND kind IN ({','.join('?' * len(kinds))})",
+            [repository, *kinds],
+        ).fetchall()
+        return [self._node(r) for r in rows]
+
+    def edges_of_kinds(self, repository: str, kinds: Sequence[str]) -> list[dict]:
+        """Every edge of the given kinds in one repository, in one query.
+
+        For the knowledge graph, which draws relationships across the whole
+        repository at once; per-node ``outgoing`` calls would be one query per
+        node.
+        """
+        if not kinds:
+            return []
+        rows = self._connect().execute(
+            f"SELECT * FROM edges WHERE repository = ? AND kind IN ({','.join('?' * len(kinds))})",
+            [repository, *kinds],
+        ).fetchall()
+        return [self._edge(r) for r in rows]
+
     def paths_first_seen(self, repository: str) -> dict[str, int]:
         """Earliest observed commit timestamp per path."""
         rows = self._connect().execute(

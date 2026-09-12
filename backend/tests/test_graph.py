@@ -11,8 +11,8 @@ from app.graph.builder import GraphBuilder, directory_of, module_of
 from app.graph.model import (
     EDGE_CONTAINS,
     EDGE_DEPENDS_ON,
-    EDGE_EXTENDS,
     EDGE_IMPORTS,
+    EDGE_INHERITS,
     NODE_CLASS,
     NODE_FILE,
     NODE_METHOD,
@@ -246,9 +246,9 @@ def test_cross_module_dependency_edge(built: GraphBuilder):
     assert any(e.source_id == node_id("demo", NODE_MODULE, "tests") for e in depends)
 
 
-def test_extends_edge_within_a_file(built: GraphBuilder):
-    extends = [e for e in built.graph.edges if e.kind == EDGE_EXTENDS]
-    assert any(e.target_id.endswith("::Base") for e in extends)
+def test_inherits_edge_within_a_file(built: GraphBuilder):
+    inherits = [e for e in built.graph.edges if e.kind == EDGE_INHERITS]
+    assert any(e.target_id.endswith("::Base") for e in inherits)
 
 
 def test_methods_hang_off_their_class(built: GraphBuilder):

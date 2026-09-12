@@ -16,9 +16,12 @@ from pathlib import Path
 from typing import Any
 
 from app.graph.model import (
+    EDGE_CALLS,
     EDGE_CONTAINS,
     EDGE_DEPENDS_ON,
+    EDGE_IMPLEMENTS,
     EDGE_IMPORTS,
+    EDGE_INHERITS,
     NODE_CLASS,
     NODE_DIRECTORY,
     NODE_EXTERNAL,
@@ -48,6 +51,23 @@ MAX_NODE_SET = 60
 
 SYMBOL_KINDS = (NODE_CLASS, NODE_FUNCTION, NODE_METHOD)
 CONTAINER_KINDS = (NODE_MODULE, NODE_DIRECTORY, NODE_FILE)
+
+#: Relationships drawn between nodes on screen. CONTAINS is left out because
+#: the hierarchy is already the layout.
+RELATION_EDGES = [EDGE_IMPORTS, EDGE_DEPENDS_ON, EDGE_CALLS, EDGE_INHERITS, EDGE_IMPLEMENTS]
+
+#: What the knowledge graph draws: files and the symbols inside them.
+#: Repository, module and directory nodes are the folder tree, not knowledge;
+#: external packages carry no edges, so they would only float unconnected.
+KNOWLEDGE_KINDS = (NODE_FILE, NODE_CLASS, NODE_FUNCTION, NODE_METHOD)
+
+#: Nodes in one knowledge graph response. FastAPI has ~5,800 files and
+#: symbols; past this a force layout stops being readable, so the most
+#: connected nodes are kept and the caller is told the rest were withheld.
+DEFAULT_KNOWLEDGE_LIMIT = 1500
+
+#: Node metadata the knowledge graph's tooltips and selection card show.
+KNOWLEDGE_NODE_DATA = ("language", "line_count", "relative_path", "start_line", "end_line")
 
 
 class GraphNotFoundError(LookupError):
@@ -116,6 +136,105 @@ class GraphService:
             "edges": edges,
             "counts": self.store.counts(repository),
             "timeline": self.store.commit_range(repository),
+        }
+
+    def knowledge_graph(
+        self, repository: str, limit: int = DEFAULT_KNOWLEDGE_LIMIT
+    ) -> dict:
+        """The whole repository as one graph of files, symbols and relationships.
+
+        The exception to reading one level at a time: the knowledge graph is
+        drawn all at once, so it is served all at once — but bounded. When a
+        repository has more than ``limit`` files and symbols, the most
+        connected are kept, because an isolated node adds a dot and no
+        knowledge. A symbol is only ever kept together with the file (and
+        class) that contains it, so nothing appears detached from its source.
+        """
+        if not self.store.has_repository(repository):
+            raise GraphNotFoundError(f"Repository {repository!r} has no graph.")
+
+        candidates = {
+            n["id"]: n for n in self.store.nodes_of_kinds(repository, KNOWLEDGE_KINDS)
+        }
+        relations = [
+            edge
+            for edge in self.store.edges_of_kinds(repository, RELATION_EDGES)
+            if edge["source"] in candidates
+            and edge["target"] in candidates
+            and edge["source"] != edge["target"]
+        ]
+
+        degree: dict[str, int] = {}
+        for edge in relations:
+            degree[edge["source"]] = degree.get(edge["source"], 0) + 1
+            degree[edge["target"]] = degree.get(edge["target"], 0) + 1
+
+        # Connected before isolated, then most connected first; files win ties
+        # so the skeleton survives truncation.
+        ranked = sorted(
+            candidates.values(),
+            key=lambda n: (
+                degree.get(n["id"], 0) == 0,
+                -degree.get(n["id"], 0),
+                n["kind"] != NODE_FILE,
+                n["key"],
+            ),
+        )
+
+        selected: dict[str, dict] = {}
+        for node in ranked:
+            if len(selected) >= limit:
+                break
+            # The node plus any containers not yet selected, up to its file.
+            chain: list[dict] = []
+            current: dict | None = node
+            while current is not None and current["id"] not in selected:
+                chain.append(current)
+                if current["kind"] == NODE_FILE:
+                    break
+                current = candidates.get(current["parent_id"] or "")
+            if len(selected) + len(chain) > limit:
+                continue
+            for member in chain:
+                selected[member["id"]] = member
+
+        # Edges and nodes are trimmed to what the drawing and the chat use: at
+        # FastAPI's size the full rows are 2.2 MB, most of it unused metadata.
+        edges = [
+            {"kind": edge["kind"], "source": edge["source"], "target": edge["target"]}
+            for edge in relations
+            if edge["source"] in selected and edge["target"] in selected
+        ]
+        # Containment is what pulls a file's symbols into a cluster around it.
+        # Derived from parent links rather than read from CONTAINS rows: every
+        # selected symbol's parent is already in memory.
+        edges.extend(
+            {"kind": EDGE_CONTAINS, "source": node["parent_id"], "target": node["id"]}
+            for node in selected.values()
+            if node["kind"] != NODE_FILE and node["parent_id"] in selected
+        )
+
+        return {
+            "repository": repository,
+            "nodes": [
+                {
+                    "id": node["id"],
+                    "kind": node["kind"],
+                    "name": node["name"],
+                    "key": node["key"],
+                    "parent_id": node["parent_id"],
+                    "data": {
+                        k: node["data"][k]
+                        for k in KNOWLEDGE_NODE_DATA
+                        if node["data"].get(k) is not None
+                    },
+                }
+                for node in selected.values()
+            ],
+            "edges": edges,
+            "counts": self.store.counts(repository),
+            "total_nodes": len(candidates),
+            "truncated": len(selected) < len(candidates),
         }
 
     def _module_rollup(self, module_id: str) -> dict:
@@ -188,7 +307,7 @@ class GraphService:
         edges = [
             edge
             for child in truncated
-            for edge in self.store.outgoing(child["id"], kinds=[EDGE_IMPORTS, EDGE_DEPENDS_ON])
+            for edge in self.store.outgoing(child["id"], kinds=RELATION_EDGES)
             if edge["target"] in child_ids
         ]
 
@@ -257,7 +376,7 @@ class GraphService:
         edges = [
             edge
             for node in nodes
-            for edge in self.store.outgoing(node["id"], kinds=[EDGE_IMPORTS, EDGE_DEPENDS_ON])
+            for edge in self.store.outgoing(node["id"], kinds=RELATION_EDGES)
             if edge["target"] in present
         ]
         return {"nodes": nodes, "edges": edges, "requested": len(node_ids)}
@@ -301,9 +420,8 @@ class GraphService:
         if node is None:
             raise GraphNotFoundError(f"Node {node_id!r} not found.")
 
-        kinds = [EDGE_IMPORTS, EDGE_DEPENDS_ON]
-        outgoing = self.store.outgoing(node_id, kinds=kinds)
-        incoming = self.store.incoming(node_id, kinds=kinds)
+        outgoing = self.store.outgoing(node_id, kinds=RELATION_EDGES)
+        incoming = self.store.incoming(node_id, kinds=RELATION_EDGES)
 
         return {
             "node": node,

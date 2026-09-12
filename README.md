@@ -86,10 +86,13 @@ service.update_repository("repositories/fastapi")   # only what changed
 service.reindex_repository("fastapi")               # drop and rebuild
 ```
 
-Or over HTTP: `POST /github/import` then `POST /index/`.
+Or over HTTP in one step: `POST /repositories/import` with `{"url": ...}`, then
+poll `GET /repositories/{name}/status`. The graph is built first (seconds), and
+code is embedded after it (minutes).
 
-The UI has two tabs. **Chat** is question-and-answer with a retrieval inspector.
-**Explorer** is the visual graph, code viewer and timeline.
+**Using it:** paste a GitHub URL. The UI is one screen — the repository's
+**knowledge graph** and a **chat** that talks to it. Each answer lights up the
+nodes it drew on; clicking a node makes it the subject of the next question.
 
 ---
 
@@ -144,7 +147,7 @@ ChromaDB                             SQLite
 | Generation | `qwen3:4b` via Ollama, behind a provider abstraction |
 | LLM plumbing | LangChain LCEL |
 | Orchestration | LangGraph |
-| Frontend | React 18, Vite, TypeScript, Tailwind, Zustand, React Flow |
+| Frontend | React 18, Vite, TypeScript, Tailwind, Zustand, d3-force on canvas |
 
 **Size:** ~6,800 lines backend · ~2,900 lines tests · ~4,700 lines frontend.
 
@@ -284,7 +287,7 @@ Repository ── CONTAINS ──► Module ── CONTAINS ──► Directory
                                                    Method
 ```
 
-8 node kinds, 10 edge kinds. **FastAPI: 6,363 nodes, 8,046 edges, 5,149 symbols
+8 node kinds, 10 edge kinds. **FastAPI: 6,367 nodes, 9,874 edges (1,813 CALLS), 5,149 symbols
 — built in 1.16 seconds.**
 
 This turns dependency questions into lookups. *"What depends on routing.py?"*
@@ -319,19 +322,19 @@ There's a test asserting exactly one LLM call per turn, whatever the intent.
 Conversational state is checkpointed per conversation, so *"what does **it**
 depend on?"* resolves against the previous turn's focus.
 
-### The visual explorer
+### The knowledge graph
 
-React Flow canvas with hierarchical drill-down — repository → module →
-directory → file → symbols. Only one level renders at a time, because 6,363
-nodes on screen is unusable and slow.
+The whole repository on one force-directed canvas: files, classes, functions
+and methods as nodes; imports, calls, inheritance and containment as edges,
+coloured by community (label propagation). `GET /graph/{repository}/knowledge`
+serves it in one response, capped at 1,500 nodes — FastAPI has 6,105 files and
+symbols, so the most connected are kept and every kept symbol brings its file.
 
-Clicking a file opens its source in a **code cell below the graph** — the graph
-never disappears. Dependency tracing highlights what a node imports and what
-imports it, dimming everything else. A timeline cursor rewinds the repository:
-drag it back and modules disappear as you pass before their first commit.
-
-The AI panel's answers drive the canvas: ask *"what depends on this?"* and the
-graph highlights while the model explains.
+The chat beside it talks to the graph in both directions. Clicking a node sends
+it with the next question, so *"what depends on this?"* needs no name. Every
+answer returns `highlight` — the nodes it drew on, subject first — and the
+canvas dims everything else and zooms to them. Nodes the cap left out are
+loaded into the graph when an answer needs them.
 
 ---
 
@@ -348,7 +351,7 @@ All figures are from live runs against the FastAPI repository. Reproduce with
 | Chunks | ~16,868 | **7,235** |
 | Chunks with a symbol name | 0 | **5,972 (82.5%)** |
 | Parse time (warm) | 1.00s | **0.36s** |
-| Graph nodes | — | **6,363** |
+| Graph nodes | — | **6,367** |
 | Graph build | — | **1.16s** |
 | Git history (1,500 commits) | — | **0.47s** |
 
@@ -489,12 +492,8 @@ the extension point for Tree-sitter.
 (`VectorStore(distance_space="cosine")`) but switching requires rebuilding every
 collection, so it has not been made default without a measured comparison.
 
-**Clone validation.** `clone_repository` does not validate the URL — scheme,
-host and derived directory name all come from user input. The frontend
-validates; the backend does not.
-
-**The UI has not been visually reviewed.** Verified at API, compile and test
-level only.
+**Import jobs live in memory.** Progress for an import in flight is lost if the
+backend restarts; the graph and index already written are not.
 
 ---
 
@@ -508,8 +507,7 @@ In rough priority order:
 3. **Tree-sitter** — real symbol extraction for JavaScript, TypeScript, Go, Rust.
 4. **Exact historical reconstruction** — per-commit trees for true time travel.
 5. **Durable conversations** — currently in-process memory.
-6. **Backend URL validation** — close the clone injection gap.
-7. **Index-time repository summary** — one LLM call per index, so "what is this
+6. **Index-time repository summary** — one LLM call per index, so "what is this
    about" is a lookup rather than an inference.
 
 ---
@@ -519,21 +517,21 @@ In rough priority order:
 ```
 backend/
   app/
-    api/          chat · github · graph · agent · indexing
+    api/          agent · repositories · graph · indexing
     rag/          parser · chunker · vector_store · retriever · bm25 · reranker
     graph/        model · analyzer · builder · store · git_history
     agent/        LangGraph routing · intent classification
     tools/        search · file · architecture
-    services/     indexing · chat · embedding · llm · graph · llm_provider
+    services/     import · indexing · github · embedding · llm · graph · llm_provider
     prompts/      system prompt
     utils/        secret redaction
   tests/          337 tests
   scripts/        retrieval benchmark
 frontend/
   src/
-    components/   chat · inspector · graph · repos · layout
-    lib/          API clients, types, formatting
-    store/        chat state · graph state
+    components/   graph (canvas renderer) · workspace (import, graph pane, chat) · layout
+    lib/          API client, types, community detection, formatting
+    store/        workspace · graph · chat
 docs/
   langchain.md    component-by-component adoption rationale
 ```

@@ -2,11 +2,17 @@
  * Typed client for the FastAPI backend.
  *
  * Requests go to `/api/*`, which Vite proxies to the backend in dev (see
- * vite.config.ts) — that sidesteps the missing CORS middleware. Endpoints the
- * backend has not grown yet are marked below and degrade instead of throwing.
+ * vite.config.ts) — that sidesteps the missing CORS middleware.
  */
-import { DEMO_REPOSITORIES, demoChat, demoImport, demoIndex } from './demo'
-import type { ChatResponse, ImportResponse, IndexStats } from './types'
+import type {
+  AgentResponse,
+  GraphEdge,
+  GraphNode,
+  KnowledgeGraph,
+  RepositoryEntry,
+  RepositoryStatus,
+  SelectionContext,
+} from './types'
 
 const BASE = import.meta.env.VITE_API_BASE ?? '/api'
 
@@ -21,7 +27,7 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit & { timeoutMs?: number }): Promise<T> {
-  const { timeoutMs = 120_000, ...rest } = init ?? {}
+  const { timeoutMs = 30_000, ...rest } = init ?? {}
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
 
@@ -49,7 +55,7 @@ async function request<T>(path: string, init?: RequestInit & { timeoutMs?: numbe
   } catch (err) {
     if (err instanceof ApiError) throw err
     if (err instanceof DOMException && err.name === 'AbortError') {
-      throw new ApiError('The backend did not respond in time. Is Ollama running?')
+      throw new ApiError('The backend did not respond in time.')
     }
     throw new ApiError('Could not reach the backend on :8000.')
   } finally {
@@ -57,69 +63,69 @@ async function request<T>(path: string, init?: RequestInit & { timeoutMs?: numbe
   }
 }
 
-/** GET / — cheap liveness probe used to decide between live and demo mode. */
+const q = encodeURIComponent
+
+/** GET / — cheap liveness probe. */
 export async function health(): Promise<boolean> {
   try {
-    await request<{ status: string }>('/', { method: 'GET', timeoutMs: 4000 })
+    await request<{ status: string }>('/', { timeoutMs: 4000 })
     return true
   } catch {
     return false
   }
 }
 
-export async function chat(
-  question: string,
-  topK: number,
-  demo: boolean,
-  repository?: string,
-): Promise<ChatResponse> {
-  if (demo) return demoChat(question, topK)
-  // `repository` is required as soon as more than one is indexed — the backend
-  // only auto-resolves when exactly one exists.
-  // qwen3 emits reasoning tokens before its answer, so a local round trip runs
-  // 60-120s on CPU. Generous ceiling; the UI shows a pending state throughout.
-  return request<ChatResponse>('/chat/', {
-    method: 'POST',
-    body: JSON.stringify({ question, top_k: topK, repository: repository ?? null }),
-    timeoutMs: 600_000,
-  })
-}
-
-/** GET /chat/repositories — what the backend can currently answer about. */
-export async function listRepositories(demo: boolean): Promise<string[]> {
-  if (demo) return DEMO_REPOSITORIES.map((r) => r.name)
-  const body = await request<{ repositories: string[] }>('/chat/repositories', {
-    method: 'GET',
-    timeoutMs: 10_000,
-  })
+export async function listRepositories(): Promise<RepositoryEntry[]> {
+  const body = await request<{ repositories: RepositoryEntry[] }>('/repositories')
   return body.repositories ?? []
 }
 
-export async function importRepository(url: string, demo: boolean): Promise<ImportResponse> {
-  if (demo) return demoImport(url)
-  return request<ImportResponse>('/github/import', {
+/** Starts clone → graph → code index. Returns at once with the job. */
+export function importRepository(url: string) {
+  return request<RepositoryStatus>('/repositories/import', {
     method: 'POST',
     body: JSON.stringify({ url }),
-    timeoutMs: 300_000,
   })
 }
 
+export function repositoryStatus(repository: string) {
+  return request<RepositoryStatus>(`/repositories/${q(repository)}/status`, { timeoutMs: 10_000 })
+}
+
+export function fetchKnowledgeGraph(repository: string) {
+  return request<KnowledgeGraph>(`/graph/${q(repository)}/knowledge`, { timeoutMs: 60_000 })
+}
+
+/** A named set of nodes and the edges among them — capped at 60 by the backend. */
+export function fetchNodeSet(nodeIds: string[]) {
+  const params = nodeIds.map((id) => `id=${q(id)}`).join('&')
+  return request<{ nodes: GraphNode[]; edges: GraphEdge[] }>(`/graph/nodes?${params}`)
+}
+
+export function searchGraph(repository: string, term: string, limit = 25) {
+  return request<{ results: GraphNode[] }>(
+    `/graph/${q(repository)}/search?q=${q(term)}&limit=${limit}`,
+  )
+}
+
 /**
- * Builds a repository's vector index. Runs for minutes on a large checkout —
- * the backend does this synchronously, hence the very long timeout.
+ * Ask the repository agent. Generation runs locally and routinely takes
+ * minutes on CPU, hence the very long ceiling.
  */
-export async function indexRepository(path: string, demo: boolean): Promise<IndexStats> {
-  if (demo) return demoIndex()
-  try {
-    return await request<IndexStats>('/index/', {
-      method: 'POST',
-      body: JSON.stringify({ path }),
-      timeoutMs: 900_000,
-    })
-  } catch (err) {
-    if (err instanceof ApiError && err.status === 404) {
-      throw new ApiError(`No checkout found at ${path}. Import the repository first.`, 404)
-    }
-    throw err
-  }
+export function askAgent(
+  question: string,
+  repository: string,
+  conversationId: string,
+  selection: SelectionContext,
+) {
+  return request<AgentResponse>('/agent/ask', {
+    method: 'POST',
+    body: JSON.stringify({
+      question,
+      repository,
+      conversation_id: conversationId,
+      explorer_context: selection,
+    }),
+    timeoutMs: 900_000,
+  })
 }

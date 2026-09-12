@@ -1,15 +1,9 @@
-"""Agent endpoint.
+"""Agent endpoint — the chat that talks to the knowledge graph.
 
-Sits alongside ``POST /chat/`` rather than replacing it: the Phase 2 route is
-pure RAG and stays available as the fast path, while this one runs the full
-Phase 4 pipeline — hybrid retrieval, graph neighbourhood, Explorer context and
-conversation state — and returns a structured navigation target beside the
-answer.
-
-The frontend uses this route for *both* the Chat view and the Explorer
-sidebar. There is one conversation (Part 4), so there is one endpoint and one
-``conversation_id`` behind it; which view the user happens to be looking at
-changes only what is sent in ``explorer_context``.
+Runs the full pipeline — hybrid retrieval, graph neighbourhood, the user's
+graph selection and conversation state — and returns, beside the answer, the
+graph nodes that answer drew on (``highlight``). The frontend lights those up
+in the knowledge graph, so every answer visibly changes the graph.
 """
 
 from __future__ import annotations
@@ -22,24 +16,25 @@ from pydantic import BaseModel, Field
 from app.agent.graph import RepositoryAgent
 from app.agent.intents import INTENTS
 from app.agent.navigation import TARGET_TYPES
-from app.services.chat_service import ChatService, UnknownRepositoryError
+from app.agent.response import (
+    UnknownRepositoryError,
+    as_source,
+    graph_highlight,
+    resolve_repository,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agent", tags=["Agent"])
 
 agent = RepositoryAgent()
-#: Reused purely for its repository-resolution rules, so both endpoints
-#: behave identically when `repository` is omitted.
-_resolver = ChatService(retriever=agent.search.retriever, llm_service=agent.llm)
 
 
 class ExplorerContextPayload(BaseModel):
-    """What the user currently has open (Part 3).
+    """What the user currently has selected in the graph.
 
-    Every field is optional. The Chat view sends an empty object; Explorer
-    sends whatever is selected. ``node_id`` is the precise field — the rest
-    are labels the model reads.
+    Every field is optional. ``node_id`` is the precise field — the rest are
+    labels the model reads.
     """
 
     repository: str | None = None
@@ -57,10 +52,15 @@ class AgentRequest(BaseModel):
     repository: str | None = None
     top_k: int = Field(default=5, ge=1, le=50)
     #: Conversation key. Follow-up questions must reuse it, or "what does it
-    #: depend on?" has no prior turn to resolve against. Chat and Explorer
-    #: share one value so the conversation survives switching views.
+    #: depend on?" has no prior turn to resolve against.
     conversation_id: str = Field(default="default", min_length=1, max_length=120)
     explorer_context: ExplorerContextPayload | None = None
+
+
+def _available_repositories() -> list[str]:
+    names = set(agent.graph_service.store.repositories())
+    names.update(agent.search.retriever.vector_store.list_repositories())
+    return sorted(names)
 
 
 @router.get("/intents")
@@ -71,9 +71,9 @@ def list_intents():
 
 @router.post("/ask")
 def ask(request: AgentRequest):
-    """Answer a question through the Phase 4 pipeline."""
+    """Answer a question about a repository from its graph and code."""
     try:
-        repository = _resolver.resolve_repository(request.repository)
+        repository = resolve_repository(request.repository, _available_repositories())
     except UnknownRepositoryError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -100,14 +100,11 @@ def ask(request: AgentRequest):
             "node_id": result.get("focus_node_id"),
             "label": result.get("focus_label"),
         },
-        #: Structured exploration target (Part 6). The frontend navigates from
-        #: this, never by parsing the answer text.
         "navigation": result.get("navigation"),
-        # Retained from Phase 3: applied automatically when the user is
-        # already in Explorer. `navigation` is the offered, opt-in version.
         "ui_action": result.get("ui_action"),
-        "graph": result.get("graph_payload"),
-        "sources": [ChatService._as_source(chunk) for chunk in (result.get("sources") or [])],
+        #: What to light up in the knowledge graph for this answer.
+        "highlight": graph_highlight(result, repository),
+        "sources": [as_source(chunk) for chunk in (result.get("sources") or [])],
         "context_stats": result.get("context_stats", {}),
         "trace": result.get("trace", []),
     }

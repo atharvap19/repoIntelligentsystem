@@ -1,9 +1,50 @@
-"""GitHub service integration."""
 """GitHub service for cloning repositories."""
 
+import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from git import Repo, GitCommandError
+from git import GitCommandError, Repo
+
+_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+class InvalidRepositoryUrl(ValueError):
+    """Raised when a URL is not a plain https://github.com/owner/repo address."""
+
+
+def parse_github_url(url: str) -> tuple[str, str]:
+    """Validate a GitHub URL and return ``(clone_url, repository_name)``.
+
+    The URL is handed to ``git clone``, so anything beyond a plain public
+    GitHub address is refused: other hosts, other schemes (``ext::`` and
+    ``file://`` run commands or read the local disk), embedded credentials,
+    and path segments that could be read as options.
+    """
+    value = (url or "").strip()
+    parts = urlsplit(value)
+
+    if parts.scheme != "https":
+        raise InvalidRepositoryUrl("Only https:// URLs are accepted.")
+    if parts.hostname not in ("github.com", "www.github.com"):
+        raise InvalidRepositoryUrl("Only github.com repositories are supported.")
+    if parts.username or parts.password or parts.port:
+        raise InvalidRepositoryUrl("The URL must not contain credentials or a port.")
+    if parts.query or parts.fragment:
+        raise InvalidRepositoryUrl("The URL must not contain a query or fragment.")
+
+    segments = [s for s in parts.path.split("/") if s]
+    if len(segments) != 2:
+        raise InvalidRepositoryUrl("Use the repository URL: https://github.com/owner/repo")
+
+    owner, name = segments
+    if name.endswith(".git"):
+        name = name[:-4]
+    for segment in (owner, name):
+        if not _SEGMENT.match(segment) or segment.startswith(("-", ".")):
+            raise InvalidRepositoryUrl(f"{segment!r} is not a valid GitHub name.")
+
+    return f"https://github.com/{owner}/{name}.git", name
 
 
 class GitHubService:
@@ -26,12 +67,7 @@ class GitHubService:
         """
 
         try:
-            # Extract repository name
-            repo_name = url.rstrip("/").split("/")[-1]
-
-            # Remove .git if present
-            if repo_name.endswith(".git"):
-                repo_name = repo_name[:-4]
+            clone_url, repo_name = parse_github_url(url)
 
             repo_path = self.repositories_dir / repo_name
 
@@ -45,13 +81,19 @@ class GitHubService:
                 }
 
             # Clone repository
-            Repo.clone_from(url, repo_path)
+            Repo.clone_from(clone_url, repo_path)
 
             return {
                 "status": "success",
                 "message": "Repository cloned successfully.",
                 "repository": repo_name,
                 "path": str(repo_path.resolve())
+            }
+
+        except InvalidRepositoryUrl as e:
+            return {
+                "status": "error",
+                "message": str(e)
             }
 
         except GitCommandError as e:

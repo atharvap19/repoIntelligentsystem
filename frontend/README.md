@@ -7,11 +7,7 @@ npm install
 npm run dev      # http://localhost:5173
 ```
 
-The app boots into **sample-data mode** if the backend is unreachable, so you can
-explore the whole interface without Ollama or an index. The pill in the top bar
-shows which mode you are in and switches between them.
-
-To run against the real backend:
+It needs the backend running:
 
 ```bash
 cd ../backend
@@ -22,55 +18,45 @@ Vite proxies `/api/*` → `http://localhost:8000` (see [vite.config.ts](vite.con
 which avoids CORS entirely in development. Point it elsewhere with
 `VITE_BACKEND_URL` — see [.env.example](.env.example).
 
-## Design intent
+## What it does
 
-Google AI Studio devotes its right panel to **model knobs** — temperature, tokens,
-safety. That is the right call when the model is the product. Here the model is
-the cheap part; the retrieval is what determines whether an answer is true. So the
-right panel is a **Retrieval Inspector** instead:
+One screen: a repository's **knowledge graph** and a **chat that talks to it**.
 
-- every chunk the model was given, ranked, with a relevance meter and raw distance
-- the full chunk text, syntax-highlighted, expandable
-- a coverage summary — how many distinct files the evidence came from, and whether
-  it clustered in one place
-- a pipeline trace for embed → search → generate
-
-Filenames the model mentions in its answer become clickable citations wired to
-those cards, so you can go from a claim to the exact bytes that produced it.
-
-Other deliberate differences: dark-first with a fine drafting grid rather than flat
-white, monospace for every code-derived string, and a left rail that is a
-**repository workspace** (index state, language mix, vector counts) rather than a
-prompt history.
+1. **Paste a GitHub URL.** The backend clones it and builds the graph in seconds,
+   then embeds the code in the background. The graph is drawn as soon as it
+   exists; the chat works immediately and quotes code once indexing finishes.
+2. **Explore the graph.** Files, classes and functions as nodes; imports, calls,
+   inheritance and containment as edges, coloured by community. Hover for the
+   path, click to select a node and see what it connects to, drag to pan, scroll
+   to zoom, search to jump to anything — including nodes the capped graph left out.
+3. **Talk to it.** A selected node travels with the question, so *"what depends on
+   this?"* needs no name. Each answer comes back with the nodes it used; the graph
+   dims everything else and zooms to them. Earlier answers can be re-shown.
 
 ## Layout
 
 ```
 src/
-  lib/          api client, shared types, formatting, offline fixtures
-  store/        zustand store — repositories, conversation, run settings
+  lib/          API client, shared types, community detection, formatting
+  store/        zustand — workspace (repositories, import jobs), graph, chat
   components/
+    graph/      canvas renderer (d3-force) and the knowledge graph component
+    workspace/  import form, graph pane, chat
     layout/     top bar, connection state, theme toggle
-    repos/      repository rail + import dialog
-    chat/       message list, citation linking, composer
-    inspector/  retrieval evidence + run config
 ```
 
 ## Backend endpoints it consumes
 
-| Endpoint | Status |
+| Endpoint | Used for |
 | --- | --- |
-| `GET /` | used as a health probe |
-| `POST /chat/` | live |
-| `POST /github/import` | live |
-| `POST /index/` | **not implemented yet** — the button surfaces a clear message |
-
-Two small backend changes would light up features the UI already renders:
-
-1. Include `content`, `language`, and `chunk_index` in the `sources` list from
-   `chat_service.py` so the Inspector can show the retrieved text.
-2. Return a `timings` object (`embed`, `search`, `generate`, in ms) from `/chat/`
-   for the per-stage pipeline trace.
+| `GET /` | health probe |
+| `GET /repositories` | repositories with a graph or an import in flight |
+| `POST /repositories/import` | start clone → graph → code index |
+| `GET /repositories/{name}/status` | import progress, polled |
+| `GET /graph/{name}/knowledge` | the whole knowledge graph, capped at 1,500 nodes |
+| `GET /graph/nodes?id=…` | load nodes an answer or search needs that the cap left out |
+| `GET /graph/{name}/search` | find files and symbols |
+| `POST /agent/ask` | answers, with the graph nodes to highlight |
 
 ## Scripts
 

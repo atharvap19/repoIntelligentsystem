@@ -14,7 +14,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.api.chat import service as chat_service
+from app.api.agent import agent
 from app.services.indexing_service import IndexingService
 
 logger = logging.getLogger(__name__)
@@ -51,10 +51,10 @@ def _resolve(request: IndexRequest) -> tuple[Path, str]:
 def _refresh_query_caches(repository: str) -> None:
     """Drop the query path's BM25 mirror after the corpus changes.
 
-    The chat service holds its own retriever with an in-memory index; without
-    this it would keep serving chunks that indexing has just replaced.
+    The agent holds its own retriever with an in-memory index; without this it
+    would keep serving chunks that indexing has just replaced.
     """
-    invalidate = getattr(chat_service.retriever, "invalidate", None)
+    invalidate = getattr(agent.search.retriever, "invalidate", None)
     if callable(invalidate):
         invalidate(repository)
 

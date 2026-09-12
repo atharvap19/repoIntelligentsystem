@@ -4,8 +4,8 @@ Node IDs contain both ``::`` and ``/`` (``fastapi::file::fastapi/routing.py``),
 so they travel as query parameters rather than path segments — a path
 parameter would need ``:path`` plus encoding on every call for no benefit.
 
-Every read is one level of the hierarchy. There is deliberately no endpoint
-that returns a whole repository graph.
+Reads are one level of the hierarchy, with one exception: ``/knowledge``
+serves the whole repository for the knowledge graph, capped by node count.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.services.graph_service import (
     DEFAULT_CHILD_LIMIT,
+    DEFAULT_KNOWLEDGE_LIMIT,
     GraphNotFoundError,
     GraphService,
 )
@@ -45,6 +46,15 @@ def list_repositories():
 def overview(repository: str):
     """Top-level view: the repository, its modules, and module dependencies."""
     return _guard(lambda: service.overview(repository))
+
+
+@router.get("/{repository}/knowledge")
+def knowledge(
+    repository: str,
+    limit: int = Query(DEFAULT_KNOWLEDGE_LIMIT, ge=50, le=4000),
+):
+    """Files, symbols and their relationships across the whole repository."""
+    return _guard(lambda: service.knowledge_graph(repository, limit=limit))
 
 
 @router.get("/{repository}/timeline")

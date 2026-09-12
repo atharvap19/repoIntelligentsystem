@@ -11,7 +11,7 @@ import logging
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from app.graph.builder import build_repository_graph
 from app.graph.git_history import extract_history
@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_REPOSITORIES_ROOT = "repositories"
 DEFAULT_BATCH_SIZE = 32
+
+#: Called as ``progress(phase, done, total)``. Phases, in order: ``parsing``,
+#: ``graph``, ``embedding`` (repeated per batch with chunk counts).
+ProgressCallback = Callable[[str, int, int], None]
 
 
 @dataclass
@@ -118,13 +122,19 @@ class IndexingService:
         self,
         repository_path: str | Path,
         repository: str | None = None,
+        progress: ProgressCallback | None = None,
     ) -> dict:
         """Index a repository into its own collection.
+
+        The graph is built before embedding: it takes seconds where embedding
+        takes minutes, so a caller watching ``progress`` can show the graph
+        long before code search is ready.
 
         Args:
             repository_path: local path to the checkout.
             repository: collection name. Defaults to the directory name, so
                 nothing about the repository is hardcoded.
+            progress: optional :data:`ProgressCallback`.
 
         Returns:
             dict: an :class:`IndexReport`.
@@ -133,14 +143,19 @@ class IndexingService:
         name = repository or path.name
         report = IndexReport(repository=name)
         started = time.perf_counter()
+        notify = progress or (lambda phase, done, total: None)
 
         logger.info("Indexing %r from %s", name, path)
 
+        notify("parsing", 0, 0)
         mark = time.perf_counter()
         files = self.parser.parse_repository(path)
         report.parse_seconds = time.perf_counter() - mark
         report.files = len(files)
         logger.info("Parsed %d files in %.2fs", report.files, report.parse_seconds)
+
+        notify("graph", 0, 0)
+        self._build_graph(name, path, files, report)
 
         mark = time.perf_counter()
         chunks = self.chunker.chunk_repository(files)
@@ -154,8 +169,7 @@ class IndexingService:
         for chunk in chunks:
             chunk["repository"] = name
 
-        self._embed_and_store(name, chunks, report)
-        self._build_graph(name, path, files, report)
+        self._embed_and_store(name, chunks, report, notify)
 
         report.total_seconds = time.perf_counter() - started
         report.stored_vectors = self.vector_store.count(name)
@@ -335,8 +349,11 @@ class IndexingService:
         repository: str,
         chunks: list[dict],
         report: IndexReport,
+        progress: ProgressCallback | None = None,
     ) -> None:
         """Embed and persist in batches, discarding each batch as it lands."""
+        if progress:
+            progress("embedding", 0, len(chunks))
         for start in range(0, len(chunks), self.batch_size):
             batch = chunks[start : start + self.batch_size]
 
@@ -352,3 +369,5 @@ class IndexingService:
 
             processed = min(start + self.batch_size, len(chunks))
             logger.debug("Embedded %d/%d chunks", processed, len(chunks))
+            if progress:
+                progress("embedding", processed, len(chunks))
