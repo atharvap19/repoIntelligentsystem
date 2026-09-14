@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from app.api.agent import router as agent_router
 from app.api.graph import router as graph_router
 from app.api.indexing import router as index_router
+from app.api.live import router as live_router
 from app.api.repositories import router as repositories_router
 
 
@@ -26,4 +27,5 @@ def root():
 app.include_router(agent_router)
 app.include_router(graph_router)
 app.include_router(index_router)
+app.include_router(live_router)
 app.include_router(repositories_router)

@@ -2,7 +2,7 @@
 
 Answer generation runs as a LangChain LCEL pipeline::
 
-    prompt | ChatOllama | StrOutputParser
+    prompt | ChatGoogleGenerativeAI | StrOutputParser
 
 That is the part of the stack where LangChain earns its place: prompt
 templating, message construction, streaming and output parsing are generic
@@ -25,16 +25,12 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
 from app.prompts.system_prompt import SYSTEM_PROMPT, USER_PROMPT
-from app.services.llm_provider import (
-    DEFAULT_HOST,
-    DEFAULT_MODEL,
-    build_chat_model,
-    settings_from_env,
-)
+from app.services.llm_provider import build_chat_model, settings_from_env
 
 logger = logging.getLogger(__name__)
 
-#: qwen3 emits its reasoning inside <think> tags before the answer.
+#: Reasoning models can emit a <think> block before the answer. Gemini does
+#: not by default, but stripping stays as a guard for other providers.
 _THINK_BLOCK = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
 
 #: How a chunk's location is described to the model.
@@ -55,7 +51,7 @@ def describe_role(relative_path: str, chunk_type: str = "") -> str:
 
 
 def strip_reasoning(text: str) -> str:
-    """Remove qwen3's ``<think>`` block from a completion.
+    """Remove a ``<think>`` reasoning block from a completion.
 
     Without this the reasoning trace is shown to the user as if it were the
     answer, and it is frequently longer than the answer itself.
@@ -68,23 +64,22 @@ def strip_reasoning(text: str) -> str:
 
 
 class LLMService:
-    """Generates answers from retrieved context via a local Ollama model."""
+    """Generates answers from retrieved context via the Gemini API."""
 
     def __init__(
         self,
         model: str | None = None,
-        host: str | None = None,
+        api_key: str | None = None,
         temperature: float = 0.1,
         llm=None,
     ):
-        # Provider, model and host come from configuration (LLM_PROVIDER,
-        # LLM_MODEL, LLM_HOST) with Ollama as the default, so nothing in the
-        # application binds to a specific runtime.
-        self.settings = settings_from_env(model=model, host=host, temperature=temperature)
+        # Provider, model and key come from configuration (LLM_PROVIDER,
+        # LLM_MODEL, GEMINI_API_KEY) with Gemini as the default, so nothing in
+        # the application binds to a specific runtime.
+        self.settings = settings_from_env(model=model, api_key=api_key, temperature=temperature)
         self.model = self.settings.model
-        self.host = self.settings.host
 
-        # `llm` is injectable so tests can exercise the chain without Ollama.
+        # `llm` is injectable so tests can exercise the chain without an API key.
         self.llm = llm or build_chat_model(self.settings)
 
         self.prompt = ChatPromptTemplate.from_messages(

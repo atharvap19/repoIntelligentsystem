@@ -1,19 +1,20 @@
 """LLM provider selection.
 
-The application must not import ``ChatOllama`` in a dozen places, or swapping
-providers later means touching a dozen files. Everything goes through
-``build_chat_model``, and configuration decides what comes back::
+The application must not import ``ChatGoogleGenerativeAI`` in a dozen places,
+or swapping providers later means touching a dozen files. Everything goes
+through ``build_chat_model``, and configuration decides what comes back::
 
-    LLM_PROVIDER=ollama      LLM_MODEL=qwen3:4b        (default)
+    LLM_PROVIDER=gemini      LLM_MODEL=gemini-3.6-flash    (default)
     LLM_PROVIDER=openai      LLM_MODEL=gpt-...
     LLM_PROVIDER=anthropic   LLM_MODEL=claude-...
 
-Only the Ollama provider is installed. The others raise a clear instruction
+Only the Gemini provider is installed. The others raise a clear instruction
 rather than a stack trace, because the point of this module is that adding one
 is a dependency install plus a registry entry, not a refactor.
 
-Nothing here sends repository content anywhere by default: Ollama is local,
-and a remote provider is opt-in through configuration.
+Gemini is a remote API: retrieved repository excerpts are sent to Google when
+a question is answered. The key is read from ``GEMINI_API_KEY`` (or
+``GOOGLE_API_KEY``), typically via ``backend/.env``.
 """
 
 from __future__ import annotations
@@ -23,12 +24,20 @@ import os
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from dotenv import load_dotenv
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_PROVIDER = "ollama"
-DEFAULT_MODEL = "qwen3:4b"
-DEFAULT_HOST = "http://localhost:11434"
+# Pick up GEMINI_API_KEY and LLM_* from backend/.env when present. Real
+# environment variables win over the file.
+load_dotenv()
+
+DEFAULT_PROVIDER = "gemini"
+DEFAULT_MODEL = "gemini-3.6-flash"
 DEFAULT_TEMPERATURE = 0.1
+
+#: Environment variables checked, in order, for the Gemini key.
+GEMINI_KEY_VARS = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
 
 
 @dataclass(frozen=True)
@@ -37,14 +46,12 @@ class LLMSettings:
 
     provider: str = DEFAULT_PROVIDER
     model: str = DEFAULT_MODEL
-    host: str = DEFAULT_HOST
     temperature: float = DEFAULT_TEMPERATURE
-    #: Disables qwen3's reasoning trace where the provider supports it.
-    reasoning: bool | None = None
+    api_key: str | None = None
 
     @property
     def is_local(self) -> bool:
-        return self.provider == "ollama"
+        return False
 
     def describe(self) -> dict:
         """Safe for logs and API responses — never includes credentials."""
@@ -53,48 +60,57 @@ class LLMSettings:
             "model": self.model,
             "local": self.is_local,
             "temperature": self.temperature,
+            "api_key_set": bool(self.api_key),
         }
+
+
+def _api_key_from_env() -> str | None:
+    for name in GEMINI_KEY_VARS:
+        value = (os.getenv(name) or "").strip()
+        if value:
+            return value
+    return None
 
 
 def settings_from_env(**overrides: Any) -> LLMSettings:
     """Read provider settings from the environment, with explicit overrides."""
-    reasoning_raw = os.getenv("LLM_REASONING")
-    reasoning = None
-    if reasoning_raw is not None:
-        reasoning = reasoning_raw.strip().lower() in {"1", "true", "yes", "on"}
-
     base = LLMSettings(
         provider=os.getenv("LLM_PROVIDER", DEFAULT_PROVIDER).strip().lower(),
         model=os.getenv("LLM_MODEL", DEFAULT_MODEL).strip(),
-        host=os.getenv("LLM_HOST", DEFAULT_HOST).strip(),
         temperature=float(os.getenv("LLM_TEMPERATURE", DEFAULT_TEMPERATURE)),
-        reasoning=reasoning,
+        api_key=_api_key_from_env(),
     )
     if not overrides:
         return base
     return LLMSettings(**{**base.__dict__, **{k: v for k, v in overrides.items() if v is not None}})
 
 
-def _build_ollama(settings: LLMSettings):
-    from langchain_ollama import ChatOllama
+def _build_gemini(settings: LLMSettings):
+    if not settings.api_key:
+        raise RuntimeError(
+            "LLM_PROVIDER='gemini' needs an API key. Set GEMINI_API_KEY in the "
+            "environment or in backend/.env (get one at https://aistudio.google.com/apikey)."
+        )
+    try:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+    except ImportError as exc:
+        raise RuntimeError(
+            "LLM_PROVIDER='gemini' needs the 'langchain-google-genai' package. "
+            "Install it with: pip install langchain-google-genai"
+        ) from exc
 
-    kwargs: dict[str, Any] = {
-        "model": settings.model,
-        "base_url": settings.host,
-        "temperature": settings.temperature,
-    }
-    if settings.reasoning is not None:
-        # qwen3 emits a <think> block by default; disabling it roughly halves
-        # generation time at some cost to answer depth.
-        kwargs["reasoning"] = settings.reasoning
-    return ChatOllama(**kwargs)
+    return ChatGoogleGenerativeAI(
+        model=settings.model,
+        google_api_key=settings.api_key,
+        temperature=settings.temperature,
+    )
 
 
 def _missing(package: str, provider: str) -> Callable[[LLMSettings], Any]:
     def build(settings: LLMSettings):
         raise RuntimeError(
             f"LLM_PROVIDER={provider!r} needs the {package!r} package. "
-            f"Install it and set the provider's API key, or use LLM_PROVIDER=ollama."
+            f"Install it and set the provider's API key, or use LLM_PROVIDER=gemini."
         )
 
     return build
@@ -102,7 +118,7 @@ def _missing(package: str, provider: str) -> Callable[[LLMSettings], Any]:
 
 #: Provider name -> factory. Adding a provider is one entry plus its package.
 PROVIDERS: dict[str, Callable[[LLMSettings], Any]] = {
-    "ollama": _build_ollama,
+    "gemini": _build_gemini,
     "openai": _missing("langchain-openai", "openai"),
     "anthropic": _missing("langchain-anthropic", "anthropic"),
 }

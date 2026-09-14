@@ -5,8 +5,8 @@ chromadb
 ollama
 python-dotenv
 
-# LLM pipeline (prompt | ChatOllama | StrOutputParser).
+# LLM pipeline (prompt | ChatGoogleGenerativeAI | StrOutputParser).
 # See docs/langchain.md for the per-component evaluation.
 langchain-core
-langchain-ollama
+langchain-google-genai
 langgraph
